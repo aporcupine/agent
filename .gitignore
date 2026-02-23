@@ -103,3 +103,6 @@ config/workflows/*.json
 config/temporal/*.key
 config/temporal/*.pem
 config/README.md
+
+# Ignore all .pem/certificates
+*.pem

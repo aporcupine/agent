@@ -40,6 +40,18 @@ const (
 	DefaultRequestTimeout = 30 * time.Second
 	// EnvSocketGID optionally sets Unix socket group ownership (root:<gid>).
 	EnvSocketGID = "THAND_ELEVATE_SOCKET_GID"
+	// EnvAdminGroup overrides the macOS admin group name.
+	EnvAdminGroup = "THAND_ELEVATE_ADMIN_GROUP"
+	// DefaultAdminGroup is the default macOS admin group name.
+	DefaultAdminGroup = "admin"
+	// EnvDseditgroupBin overrides the dseditgroup binary path/name.
+	EnvDseditgroupBin = "THAND_ELEVATE_DSEDITGROUP_BIN"
+	// DefaultDseditgroupBin is the default dseditgroup binary name.
+	DefaultDseditgroupBin = "dseditgroup"
+	// EnvDsmemberutilBin overrides the dsmemberutil binary path/name.
+	EnvDsmemberutilBin = "THAND_ELEVATE_DSMEMBERUTIL_BIN"
+	// DefaultDsmemberutilBin is the default dsmemberutil binary name.
+	DefaultDsmemberutilBin = "dsmemberutil"
 	// EnvLogLevel overrides helper log level.
 	EnvLogLevel = "THAND_ELEVATE_LOG_LEVEL"
 	// DefaultLogLevel is the default helper log level.
@@ -53,6 +65,10 @@ type Config struct {
 	SudoersFile string
 	VisudoBin   string
 	StatePath   string
+
+	AdminGroup      string
+	DseditgroupBin  string
+	DsmemberutilBin string
 
 	CleanupInterval time.Duration
 	RequestTimeout  time.Duration
@@ -111,6 +127,21 @@ func LoadFromEnv() (*Config, error) {
 		}
 		socketGID = parsed
 	}
+	adminGroup := strings.TrimSpace(os.Getenv(EnvAdminGroup))
+	if adminGroup == "" {
+		adminGroup = DefaultAdminGroup
+	}
+
+	dseditgroupBin := strings.TrimSpace(os.Getenv(EnvDseditgroupBin))
+	if dseditgroupBin == "" {
+		dseditgroupBin = DefaultDseditgroupBin
+	}
+
+	dsmemberutilBin := strings.TrimSpace(os.Getenv(EnvDsmemberutilBin))
+	if dsmemberutilBin == "" {
+		dsmemberutilBin = DefaultDsmemberutilBin
+	}
+
 	logLevel := strings.TrimSpace(os.Getenv(EnvLogLevel))
 	if logLevel == "" {
 		logLevel = DefaultLogLevel
@@ -122,6 +153,10 @@ func LoadFromEnv() (*Config, error) {
 		SudoersFile: sudoersFile,
 		VisudoBin:   visudoBin,
 		StatePath:   statePath,
+
+		AdminGroup:      adminGroup,
+		DseditgroupBin:  dseditgroupBin,
+		DsmemberutilBin: dsmemberutilBin,
 
 		CleanupInterval: cleanupInterval,
 		RequestTimeout:  requestTimeout,
