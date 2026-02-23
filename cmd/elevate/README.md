@@ -11,8 +11,8 @@ It accepts local IPC requests, verifies a challenge-response signature using pin
 
 | Platform | Grant Mechanism | Clock Source | Status |
 |---|---|---|---|
-| Linux | `/etc/sudoers.d/thand-<request_id>` with `visudo` validation | `/proc/uptime` monotonic time | ✅ Complete |
-| macOS | `dseditgroup` admin group membership via Directory Services | `sysctl kern.boottime` derived uptime | ✅ Complete |
+| Linux | `/etc/sudoers.d/thand-<request_id>` with `visudo` validation | `ClockGettime(CLOCK_BOOTTIME)` | ✅ Complete |
+| macOS | `dseditgroup` admin group membership via Directory Services | `ClockGettime(CLOCK_MONOTONIC)` | ✅ Complete |
 | Windows | `NetLocalGroupAddMembers` / PowerShell fallback | — | ⚠️ Not started |
 
 ### Core Components
@@ -38,9 +38,10 @@ It accepts local IPC requests, verifies a challenge-response signature using pin
   - Both engines share validation helpers (`isValidRequestID`, `isValidUsername`).
   - Revoke is idempotent on both platforms.
 - `clock/`
-  - **Linux:** `linux_clock.go` — monotonic time from `/proc/uptime`.
-  - **macOS:** `darwin_clock.go` — monotonic uptime derived from `sysctl -n kern.boottime`.
-  - Both fall back to process-relative time on error.
+  - `unix_clock.go` — unified monotonic + wall-clock implementation using `ClockGettime`.
+  - `clock_source_linux.go` — selects `CLOCK_BOOTTIME` (survives suspend).
+  - `clock_source_darwin.go` — selects `CLOCK_MONOTONIC`.
+  - Falls back to process-relative time on syscall error.
 - `state/`
   - Atomic state persistence (`tmp + fsync + rename + dir fsync`).
   - Single versioned JSON file with dual-clock expiry (monotonic + wall-clock fallback).

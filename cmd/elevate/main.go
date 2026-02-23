@@ -149,7 +149,7 @@ func buildLinuxPlatformDependencies(cfg *elevateconfig.Config) (*platformDepende
 	return &platformDependencies{
 		ipc:         ipcServer,
 		grantEngine: grantEngine,
-		clock:       clock.NewLinuxClock(),
+		clock:       clock.NewUnixClock(),
 	}, nil
 }
 
@@ -175,7 +175,7 @@ func buildDarwinPlatformDependencies(cfg *elevateconfig.Config) (*platformDepend
 	return &platformDependencies{
 		ipc:         ipcServer,
 		grantEngine: grantEngine,
-		clock:       clock.NewDarwinClock(),
+		clock:       clock.NewUnixClock(),
 	}, nil
 }
 
