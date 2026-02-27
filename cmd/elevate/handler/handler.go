@@ -67,13 +67,6 @@ func New(grantEngine GrantEngine, verifier SignatureVerifier, stateStore StateSt
 }
 
 // HandleConnection is the per-connection router.
-//
-// NOTE(review): There is no input validation on req.Username or req.RequestID
-// at the handler level before they are used in log messages and passed to the
-// grant engine. While the grant engine does validate these, consider adding
-// basic sanitization here as defense-in-depth (e.g., reject empty fields,
-// control characters) before the auth flow to avoid wasting a nonce on
-// obviously invalid requests.
 func (h *Handler) HandleConnection(ctx context.Context, conn IPCConn) error {
 	reqCtx, cancel := context.WithTimeout(ctx, h.requestTimeout)
 	defer cancel()

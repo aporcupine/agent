@@ -17,11 +17,6 @@ func (s *UnixServer) applyWindowsACL(path string) error {
 		return nil
 	}
 
-	// NOTE(review): The socketUser value is used directly in the icacls command
-	// arguments. While Unix socket paths are typically controlled by root, the
-	// socketUser string comes from environment config. Consider validating it
-	// against a safe character pattern (e.g. no semicolons, pipes, quotes) to
-	// prevent potential command injection via THAND_ELEVATE_SOCKET_USER.
 	args := []string{
 		path,
 		"/inheritance:r",

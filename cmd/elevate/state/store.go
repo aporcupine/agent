@@ -142,11 +142,6 @@ func (s *FileStore) readState() (*fileState, error) {
 }
 
 // writeState persists state using temp-file + fsync + rename for atomic updates.
-//
-// NOTE(review): The state file permissions are implicitly set by os.CreateTemp
-// (typically 0600). For a root-owned daemon persisting privileged grant state,
-// consider explicitly setting restrictive permissions (0600 root:root) on the
-// temp file before rename to ensure no information leakage window.
 func (s *FileStore) writeState(st *fileState) error {
 	st.Version = stateSchemaVersion
 
