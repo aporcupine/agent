@@ -30,6 +30,11 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	defer s.ipc.Close()
 
+	// TODO(review): Connections are handled sequentially on the accept goroutine.
+	// A slow or malicious client blocks all other connections until its request
+	// timeout expires. Consider handling each connection in its own goroutine
+	// with a bounded concurrency semaphore (e.g. chan struct{} of capacity N)
+	// to allow parallel request processing without unbounded goroutine growth.
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil
@@ -43,9 +48,11 @@ func (s *Server) Run(ctx context.Context) error {
 			return err
 		}
 
+		// TODO(review): HandleConnection errors are silently dropped here.
+		// At minimum, log the error at warn/debug level so operators can
+		// diagnose connection failures (malformed frames, auth rejections, etc.).
 		if err := s.handler.HandleConnection(ctx, conn); err != nil {
 			_ = conn.Close()
-			// Chunk 1: no logging/error policy yet.
 			continue
 		}
 

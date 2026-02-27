@@ -146,6 +146,10 @@ func isExpired(grant domain.GrantState, nowMonoNS int64, nowWallUTC time.Time) b
 		return true
 	}
 
+	// NOTE(review): If DurationSeconds is extremely large (>292 years), this
+	// multiplication could overflow int64. Consider capping DurationSeconds at
+	// config validation time (e.g. max 30 days) to prevent overflow and enforce
+	// a reasonable upper bound on grant duration.
 	durationNS := grant.DurationSeconds * int64(time.Second)
 
 	// Check wall clock expiry first as it should be valid unless the wall clock has been changed.

@@ -12,6 +12,11 @@ import (
 // Embedded key files are compile-time pinned key material.
 // Values are PEM-encoded PKIX Ed25519 public keys.
 //
+// IMPORTANT(review): Any .pem file in this directory is compiled into the binary
+// as a trusted signing key. The manual-test-key.pem currently present should be
+// removed or renamed to .pem.example before production deployment, as anyone
+// with the corresponding private key can authenticate to the daemon.
+//
 //go:embed keys
 var trustedKeyFiles embed.FS
 var trustedKeysFS fs.FS = trustedKeyFiles

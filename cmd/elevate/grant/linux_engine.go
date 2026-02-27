@@ -129,6 +129,10 @@ func NewLinuxEngine(cfg LinuxEngineConfig, opts ...EngineOption) (handler.GrantE
 
 // Grant validates input, checks sudoers preconditions, writes a temporary sudoers
 // rule, validates it with visudo, and returns the resulting expiry metadata.
+//
+// NOTE(review): The sudoers rule grants unrestricted NOPASSWD sudo access
+// (ALL=(ALL:ALL) NOPASSWD: ALL). Consider whether the grant scope should be
+// configurable or limited to specific commands to follow least-privilege principles.
 func (e *LinuxEngine) Grant(ctx context.Context, req domain.GrantRequest) (domain.GrantResult, error) {
 	if !isValidRequestID(req.RequestID) || !isValidUsername(req.Username) {
 		return domain.GrantResult{}, ErrInvalidGrantRequest

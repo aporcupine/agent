@@ -8,6 +8,12 @@ import (
 
 // handleRevoke is split into its own file so revoke flow can evolve independently.
 func (h *Handler) handleRevoke(ctx context.Context, conn IPCConn, req domain.RequestFrame) error {
+	// NOTE(review): Auth failure here returns nil to the caller (swallowed),
+	// but in handleGrant, auth failure returns the writeRequestError result.
+	// This inconsistency means revoke auth failures won't propagate to the
+	// server loop for logging. Consider making error handling consistent
+	// across both paths, or at minimum documenting why revoke intentionally
+	// swallows auth errors.
 	if err := h.authenticateRequest(ctx, conn, req); err != nil {
 		_ = h.writeRequestError(ctx, conn, req, err)
 		return nil
