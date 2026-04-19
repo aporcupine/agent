@@ -103,3 +103,7 @@ config/workflows/*.json
 config/temporal/*.key
 config/temporal/*.pem
 config/README.md
+
+# Ignore manual test keys only; production trust anchors in verify/keys/ must be committed
+cmd/elevate/verify/keys/*.pem
+.github/prompts/plan-updateElevateReadme.prompt.md
