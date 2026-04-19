@@ -76,12 +76,6 @@ func NewDarwinEngine(cfg DarwinEngineConfig, opts ...DarwinEngineOption) (*Darwi
 		dseditgroupBin:  strings.TrimSpace(cfg.DseditgroupBin),
 		dsmemberutilBin: strings.TrimSpace(cfg.DsmemberutilBin),
 		now:             func() time.Time { return time.Now().UTC() },
-		checkAlreadyPrivileged: func(ctx context.Context, username string) (bool, error) {
-			_ = ctx
-			_ = username
-			// Hook only in this chunk; actual baseline persistence happens in state layer.
-			return false, nil
-		},
 	}
 
 	for _, opt := range opts {
@@ -95,6 +89,12 @@ func NewDarwinEngine(cfg DarwinEngineConfig, opts ...DarwinEngineOption) (*Darwi
 	}
 	if e.dsmemberutilBin == "" {
 		return nil, errors.New("dsmemberutil binary is required")
+	}
+
+	if e.checkAlreadyPrivileged == nil {
+		e.checkAlreadyPrivileged = func(ctx context.Context, username string) (bool, error) {
+			return e.checkMembership(ctx, username, e.adminGroup)
+		}
 	}
 
 	// Set default command implementations if not overridden by options.

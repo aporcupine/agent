@@ -364,6 +364,37 @@ func TestHandleConnectionPayloadMismatchWritesError(t *testing.T) {
 	assertResultErrorCode(t, conn.writeFrames[1], ErrorCodeUnauthorized)
 }
 
+func TestHandleConnectionGrantSkipsRollbackWhenAlreadyPrivileged(t *testing.T) {
+	req := domain.RequestFrame{
+		Type:            domain.FrameTypeRequest,
+		Action:          domain.ActionGrant,
+		WorkflowID:      "wf-1",
+		RequestID:       "req-no-rollback",
+		Username:        "alice",
+		DurationSeconds: 60,
+	}
+	nonce := "fixed-nonce-no-rollback"
+
+	conn := &stubConn{
+		readFrames: [][]byte{
+			mustJSON(t, req),
+			mustJSON(t, signedResponseFor(t, req, nonce)),
+		},
+	}
+	grantEngine := &stubGrantEngine{grantResult: domain.GrantResult{WasAlreadyPrivileged: true}}
+	state := &stubStateStore{putErr: errors.New("disk full")}
+	h := New(grantEngine, &stubVerifier{}, state, stubClock{mono: 123, wall: time.Now().UTC()})
+	h.generateNonce = func() (string, error) { return nonce, nil }
+
+	if err := h.HandleConnection(context.Background(), conn); err != nil {
+		t.Fatalf("HandleConnection failed: %v", err)
+	}
+	if grantEngine.revokeCalls != 0 {
+		t.Fatalf("expected no rollback revoke when user was already privileged, got %d", grantEngine.revokeCalls)
+	}
+	assertChallengeAndResult(t, conn.writeFrames, nonce, req.RequestID, resultStatusError)
+}
+
 func TestHandleConnectionGrantRollsBackOnStatePersistFailure(t *testing.T) {
 	req := domain.RequestFrame{
 		Type:            domain.FrameTypeRequest,
