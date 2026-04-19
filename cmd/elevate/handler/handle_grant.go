@@ -50,6 +50,17 @@ func (h *Handler) handleGrant(ctx context.Context, conn IPCConn, req domain.Requ
 		WasAlreadyPrivileged: result.WasAlreadyPrivileged,
 	}
 	if err := h.stateStore.Put(ctx, state); err != nil {
+		// Best-effort rollback: undo the OS-level grant so elevation doesn't persist untracked.
+		revokeReq := domain.RevokeRequest{RequestID: req.RequestID, Username: req.Username}
+		if rErr := h.grantEngine.Revoke(ctx, revokeReq); rErr != nil {
+			h.logger.Error("rollback revoke failed after state persist error",
+				"component", "elevate_handler",
+				"request_id", req.RequestID,
+				"username", req.Username,
+				"revoke_err", rErr,
+				"persist_err", err,
+			)
+		}
 		return h.writeRequestError(ctx, conn, req, wrapInternal("persist grant state", err))
 	}
 

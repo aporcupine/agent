@@ -161,6 +161,15 @@ func (e *DarwinEngine) Grant(ctx context.Context, req domain.GrantRequest) (doma
 		return domain.GrantResult{}, fmt.Errorf("check baseline privilege: %w", err)
 	}
 
+	if alreadyPrivileged {
+		return domain.GrantResult{
+			RequestID:            req.RequestID,
+			Username:             req.Username,
+			Expiry:               e.now().Add(time.Duration(req.DurationSeconds) * time.Second),
+			WasAlreadyPrivileged: true,
+		}, nil
+	}
+
 	if err := e.addMember(ctx, req.Username, e.adminGroup); err != nil {
 		return domain.GrantResult{}, fmt.Errorf("add to admin group: %w", err)
 	}
@@ -177,14 +186,14 @@ func (e *DarwinEngine) Grant(ctx context.Context, req domain.GrantRequest) (doma
 		RequestID:            req.RequestID,
 		Username:             req.Username,
 		Expiry:               e.now().Add(time.Duration(req.DurationSeconds) * time.Second),
-		WasAlreadyPrivileged: alreadyPrivileged,
+		WasAlreadyPrivileged: false,
 	}, nil
 }
 
 // Revoke removes the user from the admin group via dseditgroup and is
 // idempotent when the user is already not a member.
 func (e *DarwinEngine) Revoke(ctx context.Context, req domain.RevokeRequest) error {
-	if !isValidRequestID(req.RequestID) {
+	if !isValidRequestID(req.RequestID) || !isValidUsername(req.Username) {
 		return ErrInvalidRevokeRequest
 	}
 

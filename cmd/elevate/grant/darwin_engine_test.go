@@ -137,8 +137,26 @@ func TestDarwinRevokeInvalidRequestID(t *testing.T) {
 	}
 }
 
+func TestDarwinRevokeInvalidUsername(t *testing.T) {
+	engine := mustNewDarwinEngine(t, DarwinEngineConfig{
+		AdminGroup:      "admin",
+		DseditgroupBin:  "dseditgroup",
+		DsmemberutilBin: "dsmemberutil",
+	})
+	cases := []domain.RevokeRequest{
+		{RequestID: "abc-123", Username: ""},
+		{RequestID: "abc-123", Username: "bad user"},
+		{RequestID: "abc-123", Username: "bad\nuser"},
+	}
+	for _, c := range cases {
+		if err := engine.Revoke(context.Background(), c); !errors.Is(err, ErrInvalidRevokeRequest) {
+			t.Fatalf("expected ErrInvalidRevokeRequest for %+v, got %v", c, err)
+		}
+	}
+}
+
 func TestDarwinBaselinePrivilegeHook(t *testing.T) {
-	members := map[string]bool{}
+	addMemberCalled := false
 	engine := mustNewDarwinEngine(t, DarwinEngineConfig{
 		AdminGroup:      "admin",
 		DseditgroupBin:  "dseditgroup",
@@ -146,12 +164,8 @@ func TestDarwinBaselinePrivilegeHook(t *testing.T) {
 	},
 		WithAddMember(func(ctx context.Context, username, group string) error {
 			_ = ctx
-			members[username] = true
+			addMemberCalled = true
 			return nil
-		}),
-		WithCheckMembership(func(ctx context.Context, username, group string) (bool, error) {
-			_ = ctx
-			return members[username], nil
 		}),
 		WithDarwinCheckAlreadyPrivileged(func(ctx context.Context, username string) (bool, error) {
 			_ = ctx
@@ -166,6 +180,30 @@ func TestDarwinBaselinePrivilegeHook(t *testing.T) {
 	}
 	if !res.WasAlreadyPrivileged {
 		t.Fatal("expected WasAlreadyPrivileged=true from hook")
+	}
+	if addMemberCalled {
+		t.Fatal("expected addMember to be skipped when user is already privileged")
+	}
+}
+
+func TestDarwinBaselinePrivilegeHookError(t *testing.T) {
+	engine := mustNewDarwinEngine(t, DarwinEngineConfig{
+		AdminGroup:      "admin",
+		DseditgroupBin:  "dseditgroup",
+		DsmemberutilBin: "dsmemberutil",
+	},
+		WithAddMember(func(ctx context.Context, username, group string) error {
+			t.Fatal("addMember should not be called when checkAlreadyPrivileged errors")
+			return nil
+		}),
+		WithDarwinCheckAlreadyPrivileged(func(ctx context.Context, username string) (bool, error) {
+			return false, errors.New("privilege check failed")
+		}),
+	)
+
+	_, err := engine.Grant(context.Background(), domain.GrantRequest{RequestID: "r1", Username: "alice", DurationSeconds: 30})
+	if err == nil || !strings.Contains(err.Error(), "check baseline privilege") {
+		t.Fatalf("expected baseline privilege check error, got %v", err)
 	}
 }
 
