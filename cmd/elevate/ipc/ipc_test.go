@@ -3,10 +3,14 @@
 package ipc
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net"
 	"os"
+	osuser "os/user"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -59,6 +63,45 @@ func (f *fakeIPCConn) WriteFrame(ctx context.Context, data []byte) error {
 }
 
 func (f *fakeIPCConn) Close() error { return nil }
+
+type timeoutErr struct{}
+
+func (timeoutErr) Error() string   { return "timeout" }
+func (timeoutErr) Timeout() bool   { return true }
+func (timeoutErr) Temporary() bool { return true }
+
+type readStep struct {
+	data []byte
+	err  error
+}
+
+type scriptedConn struct {
+	steps []readStep
+	index int
+}
+
+func (c *scriptedConn) Read(p []byte) (int, error) {
+	if c.index >= len(c.steps) {
+		return 0, io.EOF
+	}
+	step := c.steps[c.index]
+	c.index++
+	n := copy(p, step.data)
+	return n, step.err
+}
+
+func (c *scriptedConn) Write(p []byte) (int, error)      { return len(p), nil }
+func (c *scriptedConn) Close() error                     { return nil }
+func (c *scriptedConn) LocalAddr() net.Addr              { return dummyAddr("local") }
+func (c *scriptedConn) RemoteAddr() net.Addr             { return dummyAddr("remote") }
+func (c *scriptedConn) SetDeadline(time.Time) error      { return nil }
+func (c *scriptedConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *scriptedConn) SetWriteDeadline(time.Time) error { return nil }
+
+type dummyAddr string
+
+func (a dummyAddr) Network() string { return "test" }
+func (a dummyAddr) String() string  { return string(a) }
 
 func mustUnixServer(t *testing.T, path string, opts ...Option) *UnixServer {
 	t.Helper()
@@ -204,6 +247,57 @@ func TestNormalizeWriteFrameDoesNotMutateInput(t *testing.T) {
 	}
 }
 
+func TestReadFramePreservesPartialDataAcrossTimeouts(t *testing.T) {
+	conn := &scriptedConn{
+		steps: []readStep{
+			{data: []byte("hello"), err: timeoutErr{}},
+			{data: []byte(" world\n"), err: nil},
+		},
+	}
+
+	frame, err := (&unixConn{
+		conn:   conn,
+		reader: bufio.NewReaderSize(conn, defaultMaxFrameBytes+1),
+		max:    defaultMaxFrameBytes,
+	}).ReadFrame(context.Background())
+	if err != nil {
+		t.Fatalf("ReadFrame failed: %v", err)
+	}
+	if string(frame) != "hello world" {
+		t.Fatalf("unexpected frame: got %q want %q", string(frame), "hello world")
+	}
+}
+
+func TestReadFrameReturnsCopiedBytes(t *testing.T) {
+	conn := &scriptedConn{
+		steps: []readStep{
+			{data: []byte("first\nsecond\n"), err: nil},
+		},
+	}
+
+	ipcConn := &unixConn{
+		conn:   conn,
+		reader: bufio.NewReaderSize(conn, defaultMaxFrameBytes+1),
+		max:    defaultMaxFrameBytes,
+	}
+	first, err := ipcConn.ReadFrame(context.Background())
+	if err != nil {
+		t.Fatalf("first ReadFrame failed: %v", err)
+	}
+	firstCopy := append([]byte(nil), first...)
+
+	second, err := ipcConn.ReadFrame(context.Background())
+	if err != nil {
+		t.Fatalf("second ReadFrame failed: %v", err)
+	}
+	if string(second) != "second" {
+		t.Fatalf("unexpected second frame: got %q want %q", string(second), "second")
+	}
+	if !bytes.Equal(first, firstCopy) {
+		t.Fatalf("first frame mutated after second read: got %q want %q", string(first), string(firstCopy))
+	}
+}
+
 func TestStartReturnsMkdirError(t *testing.T) {
 	srv := mustUnixServer(t, filepath.Join(t.TempDir(), "elevate.sock"),
 		WithMkdirAll(func(path string, perm os.FileMode) error {
@@ -258,7 +352,7 @@ func TestStartChmodFailureClosesListener(t *testing.T) {
 	}
 }
 
-func TestStartAppliesSocketGIDOwnership(t *testing.T) {
+func TestStartAppliesSocketGroupOwnership(t *testing.T) {
 	fl := &fakeListener{}
 	var chownCalls int
 	var sawDir bool
@@ -266,7 +360,13 @@ func TestStartAppliesSocketGIDOwnership(t *testing.T) {
 	socketPath := filepath.Join(t.TempDir(), "elevate.sock")
 
 	srv := mustUnixServer(t, socketPath,
-		WithSocketGID(1234),
+		WithSocketGroup("thand"),
+		WithLookupGroup(func(groupname string) (*osuser.Group, error) {
+			if groupname != "thand" {
+				t.Fatalf("unexpected group lookup: %s", groupname)
+			}
+			return &osuser.Group{Name: "thand", Gid: "1234"}, nil
+		}),
 		WithListenUnix(func(network string, laddr *net.UnixAddr) (unixListener, error) {
 			_ = network
 			_ = laddr
@@ -279,7 +379,7 @@ func TestStartAppliesSocketGIDOwnership(t *testing.T) {
 		}),
 		WithChown(func(name string, uid, gid int) error {
 			chownCalls++
-			if uid != 0 || gid != 1234 {
+			if uid != -1 || gid != 1234 {
 				t.Fatalf("unexpected chown ownership uid=%d gid=%d", uid, gid)
 			}
 			if name == filepath.Dir(socketPath) {
@@ -303,7 +403,11 @@ func TestStartAppliesSocketGIDOwnership(t *testing.T) {
 func TestStartSocketDirChownFailure(t *testing.T) {
 	socketPath := filepath.Join(t.TempDir(), "elevate.sock")
 	srv := mustUnixServer(t, socketPath,
-		WithSocketGID(1234),
+		WithSocketGroup("thand"),
+		WithLookupGroup(func(groupname string) (*osuser.Group, error) {
+			_ = groupname
+			return &osuser.Group{Name: "thand", Gid: "1234"}, nil
+		}),
 		WithChown(func(name string, uid, gid int) error {
 			_ = name
 			_ = uid
@@ -320,7 +424,11 @@ func TestStartSocketChownFailureClosesListener(t *testing.T) {
 	fl := &fakeListener{}
 	socketPath := filepath.Join(t.TempDir(), "elevate.sock")
 	srv := mustUnixServer(t, socketPath,
-		WithSocketGID(1234),
+		WithSocketGroup("thand"),
+		WithLookupGroup(func(groupname string) (*osuser.Group, error) {
+			_ = groupname
+			return &osuser.Group{Name: "thand", Gid: "1234"}, nil
+		}),
 		WithListenUnix(func(network string, laddr *net.UnixAddr) (unixListener, error) {
 			_ = network
 			_ = laddr

@@ -75,7 +75,6 @@ func (s *FileStore) Delete(ctx context.Context, requestID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	requestID = strings.TrimSpace(requestID)
 	if requestID == "" {
 		return errors.New("request ID is required")
 	}
@@ -184,12 +183,7 @@ func (s *FileStore) writeState(st *fileState) error {
 	}
 	keepTmp = false
 
-	dirFD, err := os.Open(dir)
-	if err != nil {
-		return fmt.Errorf("open state directory: %w", err)
-	}
-	defer dirFD.Close()
-	if err := dirFD.Sync(); err != nil {
+	if err := syncStateDir(dir); err != nil {
 		return fmt.Errorf("sync state directory: %w", err)
 	}
 

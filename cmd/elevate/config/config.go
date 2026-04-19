@@ -4,16 +4,20 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"strconv"
+	"runtime"
 	"strings"
 	"time"
+
+	"github.com/thand-io/agent/cmd/elevate/identity"
 )
 
 const (
 	// EnvSocketPath overrides the helper IPC socket path.
 	EnvSocketPath = "THAND_ELEVATE_SOCKET_PATH"
-	// DefaultSocketPath is the default helper IPC socket path.
+	// DefaultSocketPath is the default helper IPC socket path on Unix platforms.
 	DefaultSocketPath = "/var/run/thand/elevate.sock"
+	// DefaultSocketPathWindows is the default helper IPC socket path on Windows.
+	DefaultSocketPathWindows = `C:\ProgramData\Thand\elevate.sock`
 	// EnvSudoersDir overrides the sudoers include directory for grant files.
 	EnvSudoersDir = "THAND_ELEVATE_SUDOERS_DIR"
 	// DefaultSudoersDir is the default sudoers include directory for grant files.
@@ -30,6 +34,8 @@ const (
 	EnvStatePath = "THAND_ELEVATE_STATE_PATH"
 	// DefaultStatePath is the default persisted grant state file path.
 	DefaultStatePath = "/var/lib/thand/elevate/state.json"
+	// DefaultStatePathWindows is the default persisted grant state file path on Windows.
+	DefaultStatePathWindows = `C:\ProgramData\Thand\elevate\state.json`
 	// EnvCleanupInterval overrides the periodic cleanup interval duration.
 	EnvCleanupInterval = "THAND_ELEVATE_CLEANUP_INTERVAL"
 	// DefaultCleanup is the default periodic cleanup interval.
@@ -38,8 +44,14 @@ const (
 	EnvRequestTimeout = "THAND_ELEVATE_REQUEST_TIMEOUT"
 	// DefaultRequestTimeout is the default per-request handler timeout.
 	DefaultRequestTimeout = 30 * time.Second
-	// EnvSocketGID optionally sets Unix socket group ownership (root:<gid>).
-	EnvSocketGID = "THAND_ELEVATE_SOCKET_GID"
+	// EnvStateRetention overrides how long completed grant tombstones are retained.
+	EnvStateRetention = "THAND_ELEVATE_STATE_RETENTION"
+	// DefaultStateRetention is the default completed grant retention window.
+	DefaultStateRetention = 24 * time.Hour
+	// EnvSocketUser optionally sets socket owner username.
+	EnvSocketUser = "THAND_ELEVATE_SOCKET_USER"
+	// EnvSocketGroup optionally sets socket group name.
+	EnvSocketGroup = "THAND_ELEVATE_SOCKET_GROUP"
 	// EnvAdminGroup overrides the macOS admin group name.
 	EnvAdminGroup = "THAND_ELEVATE_ADMIN_GROUP"
 	// DefaultAdminGroup is the default macOS admin group name.
@@ -56,6 +68,8 @@ const (
 	EnvLogLevel = "THAND_ELEVATE_LOG_LEVEL"
 	// DefaultLogLevel is the default helper log level.
 	DefaultLogLevel = "info"
+	// EnvWindowsAdminGroup overrides the local administrator group name on Windows.
+	EnvWindowsAdminGroup = "THAND_ELEVATE_WINDOWS_ADMIN_GROUP"
 )
 
 // Config contains runtime configuration for the elevate helper.
@@ -66,21 +80,23 @@ type Config struct {
 	VisudoBin   string
 	StatePath   string
 
-	AdminGroup      string
-	DseditgroupBin  string
-	DsmemberutilBin string
-
-	CleanupInterval time.Duration
-	RequestTimeout  time.Duration
-	SocketGID       int
-	LogLevel        string
+	CleanupInterval   time.Duration
+	RequestTimeout    time.Duration
+	StateRetention    time.Duration
+	SocketUser        string
+	SocketGroup       string
+	AdminGroup        string
+	DseditgroupBin    string
+	DsmemberutilBin   string
+	LogLevel          string
+	WindowsAdminGroup string
 }
 
 // LoadFromEnv loads helper configuration from environment variables with defaults.
 func LoadFromEnv() (*Config, error) {
 	socketPath := strings.TrimSpace(os.Getenv(EnvSocketPath))
 	if socketPath == "" {
-		socketPath = DefaultSocketPath
+		socketPath = defaultSocketPath()
 	}
 
 	sudoersDir := strings.TrimSpace(os.Getenv(EnvSudoersDir))
@@ -100,7 +116,7 @@ func LoadFromEnv() (*Config, error) {
 
 	statePath := strings.TrimSpace(os.Getenv(EnvStatePath))
 	if statePath == "" {
-		statePath = DefaultStatePath
+		statePath = defaultStatePath()
 	}
 
 	cleanupInterval := DefaultCleanup
@@ -111,6 +127,7 @@ func LoadFromEnv() (*Config, error) {
 		}
 		cleanupInterval = parsed
 	}
+
 	requestTimeout := DefaultRequestTimeout
 	if configured := strings.TrimSpace(os.Getenv(EnvRequestTimeout)); configured != "" {
 		parsed, err := time.ParseDuration(configured)
@@ -119,14 +136,19 @@ func LoadFromEnv() (*Config, error) {
 		}
 		requestTimeout = parsed
 	}
-	socketGID := -1
-	if configured := strings.TrimSpace(os.Getenv(EnvSocketGID)); configured != "" {
-		parsed, err := strconv.Atoi(configured)
+
+	stateRetention := DefaultStateRetention
+	if configured := strings.TrimSpace(os.Getenv(EnvStateRetention)); configured != "" {
+		parsed, err := time.ParseDuration(configured)
 		if err != nil {
-			return nil, fmt.Errorf("parse socket gid: %w", err)
+			return nil, fmt.Errorf("parse state retention: %w", err)
 		}
-		socketGID = parsed
+		stateRetention = parsed
 	}
+
+	socketUser := strings.TrimSpace(os.Getenv(EnvSocketUser))
+	socketGroup := strings.TrimSpace(os.Getenv(EnvSocketGroup))
+
 	adminGroup := strings.TrimSpace(os.Getenv(EnvAdminGroup))
 	if adminGroup == "" {
 		adminGroup = DefaultAdminGroup
@@ -147,6 +169,8 @@ func LoadFromEnv() (*Config, error) {
 		logLevel = DefaultLogLevel
 	}
 
+	windowsAdminGroup := strings.TrimSpace(os.Getenv(EnvWindowsAdminGroup))
+
 	cfg := &Config{
 		SocketPath:  socketPath,
 		SudoersDir:  sudoersDir,
@@ -154,14 +178,16 @@ func LoadFromEnv() (*Config, error) {
 		VisudoBin:   visudoBin,
 		StatePath:   statePath,
 
-		AdminGroup:      adminGroup,
-		DseditgroupBin:  dseditgroupBin,
-		DsmemberutilBin: dsmemberutilBin,
-
-		CleanupInterval: cleanupInterval,
-		RequestTimeout:  requestTimeout,
-		SocketGID:       socketGID,
-		LogLevel:        logLevel,
+		CleanupInterval:   cleanupInterval,
+		RequestTimeout:    requestTimeout,
+		StateRetention:    stateRetention,
+		SocketUser:        socketUser,
+		SocketGroup:       socketGroup,
+		AdminGroup:        adminGroup,
+		DseditgroupBin:    dseditgroupBin,
+		DsmemberutilBin:   dsmemberutilBin,
+		LogLevel:          logLevel,
+		WindowsAdminGroup: windowsAdminGroup,
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -171,8 +197,26 @@ func LoadFromEnv() (*Config, error) {
 	return cfg, nil
 }
 
+func defaultSocketPath() string {
+	if runtime.GOOS == "windows" {
+		return DefaultSocketPathWindows
+	}
+	return DefaultSocketPath
+}
+
+func defaultStatePath() string {
+	if runtime.GOOS == "windows" {
+		return DefaultStatePathWindows
+	}
+	return DefaultStatePath
+}
+
 // Validate ensures required configuration fields are present and safe.
 func (c *Config) Validate() error {
+	return c.validateForOS(runtime.GOOS)
+}
+
+func (c *Config) validateForOS(goos string) error {
 	if c == nil {
 		return fmt.Errorf("config is required")
 	}
@@ -180,15 +224,30 @@ func (c *Config) Validate() error {
 	if strings.TrimSpace(c.SocketPath) == "" {
 		return fmt.Errorf("socket path is required")
 	}
-	if strings.TrimSpace(c.SudoersDir) == "" {
-		return fmt.Errorf("sudoers dir is required")
+
+	switch goos {
+	case "linux":
+		if strings.TrimSpace(c.SudoersDir) == "" {
+			return fmt.Errorf("sudoers dir is required")
+		}
+		if strings.TrimSpace(c.SudoersFile) == "" {
+			return fmt.Errorf("sudoers file is required")
+		}
+		if strings.TrimSpace(c.VisudoBin) == "" {
+			return fmt.Errorf("visudo binary is required")
+		}
+	case "darwin":
+		if !identity.ValidAccountName(c.AdminGroup) {
+			return fmt.Errorf("admin group is invalid")
+		}
+		if strings.TrimSpace(c.DseditgroupBin) == "" {
+			return fmt.Errorf("dseditgroup binary is required")
+		}
+		if strings.TrimSpace(c.DsmemberutilBin) == "" {
+			return fmt.Errorf("dsmemberutil binary is required")
+		}
 	}
-	if strings.TrimSpace(c.SudoersFile) == "" {
-		return fmt.Errorf("sudoers file is required")
-	}
-	if strings.TrimSpace(c.VisudoBin) == "" {
-		return fmt.Errorf("visudo binary is required")
-	}
+
 	if strings.TrimSpace(c.StatePath) == "" {
 		return fmt.Errorf("state path is required")
 	}
@@ -198,11 +257,20 @@ func (c *Config) Validate() error {
 	if c.RequestTimeout <= 0 {
 		return fmt.Errorf("request timeout must be > 0")
 	}
-	if c.SocketGID < -1 {
-		return fmt.Errorf("socket gid must be >= -1")
+	if c.StateRetention <= 0 {
+		return fmt.Errorf("state retention must be > 0")
 	}
 	if _, err := ParseLogLevel(c.LogLevel); err != nil {
 		return err
+	}
+	if c.SocketUser != "" && !identity.ValidAccountName(c.SocketUser) {
+		return fmt.Errorf("socket user is invalid")
+	}
+	if c.SocketGroup != "" && !identity.ValidAccountName(c.SocketGroup) {
+		return fmt.Errorf("socket group is invalid")
+	}
+	if goos == "windows" && c.WindowsAdminGroup != "" && !identity.ValidWindowsAdminGroup(c.WindowsAdminGroup) {
+		return fmt.Errorf("windows admin group is invalid")
 	}
 
 	return nil

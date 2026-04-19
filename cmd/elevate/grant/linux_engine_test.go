@@ -54,6 +54,13 @@ func TestGrantWritesAndRevokesSudoersFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read sudoers file failed: %v", err)
 	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat sudoers file failed: %v", err)
+	}
+	if got := info.Mode().Perm(); got != sudoersFileMode {
+		t.Fatalf("unexpected sudoers file mode: got %o want %o", got, sudoersFileMode)
+	}
 	text := string(b)
 	if !strings.Contains(text, "request_id: abc-123") || !strings.Contains(text, "alice ALL=(ALL:ALL) NOPASSWD: ALL") {
 		t.Fatalf("unexpected sudoers content:\n%s", text)
@@ -107,9 +114,13 @@ func TestGrantInvalidRequest(t *testing.T) {
 		{RequestID: "", Username: "alice", DurationSeconds: 10},
 		{RequestID: "bad/id", Username: "alice", DurationSeconds: 10},
 		{RequestID: "bad\nid", Username: "alice", DurationSeconds: 10},
+		{RequestID: " req", Username: "alice", DurationSeconds: 10},
+		{RequestID: "req ", Username: "alice", DurationSeconds: 10},
 		{RequestID: "x", Username: "", DurationSeconds: 10},
 		{RequestID: "x", Username: "bad user", DurationSeconds: 10},
 		{RequestID: "x", Username: "bad\nuser", DurationSeconds: 10},
+		{RequestID: "x", Username: " alice", DurationSeconds: 10},
+		{RequestID: "x", Username: "alice ", DurationSeconds: 10},
 		{RequestID: "x", Username: "alice", DurationSeconds: 0},
 	}
 	for _, c := range cases {
@@ -164,6 +175,9 @@ func TestBaselinePrivilegeHook(t *testing.T) {
 	if !res.WasAlreadyPrivileged {
 		t.Fatal("expected WasAlreadyPrivileged=true from hook")
 	}
+	if _, err := os.Stat(filepath.Join(dir, "thand-r1")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected no sudoers file when user already has baseline privilege, got err=%v", err)
+	}
 }
 
 func TestGrantFailsWhenSudoersDirMissing(t *testing.T) {
@@ -199,8 +213,37 @@ func TestGrantFailsWhenSudoersMissingIncludedir(t *testing.T) {
 		Username:        "alice",
 		DurationSeconds: 60,
 	})
-	if err == nil || !strings.Contains(err.Error(), "missing #includedir") {
+	if err == nil || !strings.Contains(err.Error(), "missing includedir") {
 		t.Fatalf("expected missing include error, got %v", err)
+	}
+}
+
+func TestGrantAcceptsAtIncludedir(t *testing.T) {
+	dir := t.TempDir()
+	sudoersFile := writeTempSudoersFile(t, "@includedir "+dir+"\n")
+
+	engine := mustNewEngine(t, LinuxEngineConfig{
+		SudoersDir:  dir,
+		SudoersFile: sudoersFile,
+		VisudoBin:   "visudo",
+	},
+		WithValidateFile(func(ctx context.Context, path string) error {
+			_ = ctx
+			if _, err := os.Stat(path); err != nil {
+				return err
+			}
+			return nil
+		}),
+	)
+
+	_, err := engine.Grant(context.Background(), domain.GrantRequest{
+		RequestID:       "abc-123",
+		WorkflowID:      "wf-1",
+		Username:        "alice",
+		DurationSeconds: 60,
+	})
+	if err != nil {
+		t.Fatalf("Grant failed with @includedir: %v", err)
 	}
 }
 
@@ -219,7 +262,7 @@ func mustNewEngine(t *testing.T, cfg LinuxEngineConfig, opts ...EngineOption) *L
 	if err != nil {
 		t.Fatalf("NewLinuxEngine failed: %v", err)
 	}
-	return engine.(*LinuxEngine)
+	return engine
 }
 
 func TestNewLinuxEngineRequiresConfigFields(t *testing.T) {

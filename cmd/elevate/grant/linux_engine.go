@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/thand-io/agent/cmd/elevate/domain"
-	"github.com/thand-io/agent/cmd/elevate/handler"
 )
 
 const (
@@ -79,8 +78,8 @@ type LinuxEngineConfig struct {
 	VisudoBin   string
 }
 
-// NewLinuxEngine constructs a Linux GrantEngine backed by sudoers.d files.
-func NewLinuxEngine(cfg LinuxEngineConfig, opts ...EngineOption) (handler.GrantEngine, error) {
+// NewLinuxEngine constructs a Linux engine backed by sudoers.d files.
+func NewLinuxEngine(cfg LinuxEngineConfig, opts ...EngineOption) (*LinuxEngine, error) {
 	e := &LinuxEngine{
 		sudoersDir:  strings.TrimSpace(cfg.SudoersDir),
 		sudoersFile: strings.TrimSpace(cfg.SudoersFile),
@@ -148,6 +147,14 @@ func (e *LinuxEngine) Grant(ctx context.Context, req domain.GrantRequest) (domai
 	if err != nil {
 		return domain.GrantResult{}, fmt.Errorf("check baseline privilege: %w", err)
 	}
+	if alreadyPrivileged {
+		return domain.GrantResult{
+			RequestID:            req.RequestID,
+			Username:             req.Username,
+			Expiry:               e.now().Add(time.Duration(req.DurationSeconds) * time.Second),
+			WasAlreadyPrivileged: true,
+		}, nil
+	}
 
 	sudoersPath := e.sudoersPath(req.RequestID)
 	tmpPath := sudoersPath + ".tmp"
@@ -161,14 +168,14 @@ func (e *LinuxEngine) Grant(ctx context.Context, req domain.GrantRequest) (domai
 		return domain.GrantResult{}, err
 	}
 
+	if err := os.Chmod(tmpPath, sudoersFileMode); err != nil {
+		_ = os.Remove(tmpPath)
+		return domain.GrantResult{}, fmt.Errorf("set sudoers permissions: %w", err)
+	}
+
 	if err := os.Rename(tmpPath, sudoersPath); err != nil {
 		_ = os.Remove(tmpPath)
 		return domain.GrantResult{}, fmt.Errorf("activate sudoers file: %w", err)
-	}
-
-	if err := os.Chmod(sudoersPath, sudoersFileMode); err != nil {
-		_ = os.Remove(sudoersPath)
-		return domain.GrantResult{}, fmt.Errorf("set sudoers permissions: %w", err)
 	}
 
 	return domain.GrantResult{
@@ -212,11 +219,11 @@ func (e *LinuxEngine) sudoersContent(req domain.GrantRequest) string {
 }
 
 func isValidRequestID(v string) bool {
-	return requestIDPattern.MatchString(strings.TrimSpace(v))
+	return requestIDPattern.MatchString(v)
 }
 
 func isValidUsername(v string) bool {
-	return usernamePattern.MatchString(strings.TrimSpace(v))
+	return usernamePattern.MatchString(v)
 }
 
 func (e *LinuxEngine) ensureSudoersDirExists() error {
@@ -237,7 +244,7 @@ func (e *LinuxEngine) ensureSudoersIncludeDir() error {
 	}
 
 	if !hasIncludedir(string(content), e.sudoersDir) {
-		return fmt.Errorf("sudoers file %q missing #includedir for %q", e.sudoersFile, e.sudoersDir)
+		return fmt.Errorf("sudoers file %q missing includedir for %q", e.sudoersFile, e.sudoersDir)
 	}
 
 	return nil
@@ -246,7 +253,7 @@ func (e *LinuxEngine) ensureSudoersIncludeDir() error {
 func hasIncludedir(content string, sudoersDir string) bool {
 	for _, line := range strings.Split(content, "\n") {
 		trimmed := strings.TrimSpace(line)
-		if !strings.HasPrefix(trimmed, "#includedir") {
+		if !strings.HasPrefix(trimmed, "#includedir") && !strings.HasPrefix(trimmed, "@includedir") {
 			continue
 		}
 		fields := strings.Fields(trimmed)

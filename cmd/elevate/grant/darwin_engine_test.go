@@ -208,5 +208,5 @@ func mustNewDarwinEngine(t *testing.T, cfg DarwinEngineConfig, opts ...DarwinEng
 	if err != nil {
 		t.Fatalf("NewDarwinEngine failed: %v", err)
 	}
-	return engine.(*DarwinEngine)
+	return engine
 }

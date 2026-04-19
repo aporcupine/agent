@@ -13,16 +13,22 @@ func TestLoadFromEnvUsesDefaultSocketPath(t *testing.T) {
 	t.Setenv(EnvStatePath, "")
 	t.Setenv(EnvCleanupInterval, "")
 	t.Setenv(EnvRequestTimeout, "")
-	t.Setenv(EnvSocketGID, "")
+	t.Setenv(EnvStateRetention, "")
+	t.Setenv(EnvSocketUser, "")
+	t.Setenv(EnvSocketGroup, "")
+	t.Setenv(EnvAdminGroup, "")
+	t.Setenv(EnvDseditgroupBin, "")
+	t.Setenv(EnvDsmemberutilBin, "")
 	t.Setenv(EnvLogLevel, "")
+	t.Setenv(EnvWindowsAdminGroup, "")
 
 	cfg, err := LoadFromEnv()
 	if err != nil {
 		t.Fatalf("LoadFromEnv failed: %v", err)
 	}
 
-	if cfg.SocketPath != DefaultSocketPath {
-		t.Fatalf("unexpected socket path: got %q want %q", cfg.SocketPath, DefaultSocketPath)
+	if cfg.SocketPath != defaultSocketPath() {
+		t.Fatalf("unexpected socket path: got %q want %q", cfg.SocketPath, defaultSocketPath())
 	}
 	if cfg.SudoersDir != DefaultSudoersDir {
 		t.Fatalf("unexpected sudoers dir: got %q want %q", cfg.SudoersDir, DefaultSudoersDir)
@@ -33,8 +39,8 @@ func TestLoadFromEnvUsesDefaultSocketPath(t *testing.T) {
 	if cfg.VisudoBin != DefaultVisudoBin {
 		t.Fatalf("unexpected visudo bin: got %q want %q", cfg.VisudoBin, DefaultVisudoBin)
 	}
-	if cfg.StatePath != DefaultStatePath {
-		t.Fatalf("unexpected state path: got %q want %q", cfg.StatePath, DefaultStatePath)
+	if cfg.StatePath != defaultStatePath() {
+		t.Fatalf("unexpected state path: got %q want %q", cfg.StatePath, defaultStatePath())
 	}
 	if cfg.CleanupInterval != DefaultCleanup {
 		t.Fatalf("unexpected cleanup interval: got %s want %s", cfg.CleanupInterval, DefaultCleanup)
@@ -42,11 +48,29 @@ func TestLoadFromEnvUsesDefaultSocketPath(t *testing.T) {
 	if cfg.RequestTimeout != DefaultRequestTimeout {
 		t.Fatalf("unexpected request timeout: got %s want %s", cfg.RequestTimeout, DefaultRequestTimeout)
 	}
-	if cfg.SocketGID != -1 {
-		t.Fatalf("unexpected socket gid: got %d want -1", cfg.SocketGID)
+	if cfg.StateRetention != DefaultStateRetention {
+		t.Fatalf("unexpected state retention: got %s want %s", cfg.StateRetention, DefaultStateRetention)
+	}
+	if cfg.SocketUser != "" {
+		t.Fatalf("unexpected socket user: got %q want empty", cfg.SocketUser)
+	}
+	if cfg.SocketGroup != "" {
+		t.Fatalf("unexpected socket group: got %q want empty", cfg.SocketGroup)
+	}
+	if cfg.AdminGroup != DefaultAdminGroup {
+		t.Fatalf("unexpected admin group: got %q want %q", cfg.AdminGroup, DefaultAdminGroup)
+	}
+	if cfg.DseditgroupBin != DefaultDseditgroupBin {
+		t.Fatalf("unexpected dseditgroup bin: got %q want %q", cfg.DseditgroupBin, DefaultDseditgroupBin)
+	}
+	if cfg.DsmemberutilBin != DefaultDsmemberutilBin {
+		t.Fatalf("unexpected dsmemberutil bin: got %q want %q", cfg.DsmemberutilBin, DefaultDsmemberutilBin)
 	}
 	if cfg.LogLevel != DefaultLogLevel {
 		t.Fatalf("unexpected log level: got %q want %q", cfg.LogLevel, DefaultLogLevel)
+	}
+	if cfg.WindowsAdminGroup != "" {
+		t.Fatalf("unexpected windows admin group: got %q want empty", cfg.WindowsAdminGroup)
 	}
 }
 
@@ -58,8 +82,14 @@ func TestLoadFromEnvUsesConfiguredSocketPath(t *testing.T) {
 	wantStatePath := "/tmp/custom-state.json"
 	wantCleanup := "30s"
 	wantRequestTimeout := "5m"
-	wantSocketGID := "1000"
+	wantStateRetention := "48h"
+	wantSocketUser := "tom"
+	wantSocketGroup := "thand"
+	wantAdminGroup := "staff"
+	wantDseditgroup := "/usr/sbin/dseditgroup"
+	wantDsmemberutil := "/usr/bin/dsmemberutil"
 	wantLogLevel := "warn"
+	wantWindowsAdminGroup := "Administrators"
 	t.Setenv(EnvSocketPath, wantSocket)
 	t.Setenv(EnvSudoersDir, wantSudoers)
 	t.Setenv(EnvSudoersFile, wantSudoersFile)
@@ -67,8 +97,14 @@ func TestLoadFromEnvUsesConfiguredSocketPath(t *testing.T) {
 	t.Setenv(EnvStatePath, wantStatePath)
 	t.Setenv(EnvCleanupInterval, wantCleanup)
 	t.Setenv(EnvRequestTimeout, wantRequestTimeout)
-	t.Setenv(EnvSocketGID, wantSocketGID)
+	t.Setenv(EnvStateRetention, wantStateRetention)
+	t.Setenv(EnvSocketUser, wantSocketUser)
+	t.Setenv(EnvSocketGroup, wantSocketGroup)
+	t.Setenv(EnvAdminGroup, wantAdminGroup)
+	t.Setenv(EnvDseditgroupBin, wantDseditgroup)
+	t.Setenv(EnvDsmemberutilBin, wantDsmemberutil)
 	t.Setenv(EnvLogLevel, wantLogLevel)
+	t.Setenv(EnvWindowsAdminGroup, wantWindowsAdminGroup)
 
 	cfg, err := LoadFromEnv()
 	if err != nil {
@@ -96,11 +132,29 @@ func TestLoadFromEnvUsesConfiguredSocketPath(t *testing.T) {
 	if cfg.RequestTimeout != 5*time.Minute {
 		t.Fatalf("unexpected request timeout: got %s want %s", cfg.RequestTimeout, 5*time.Minute)
 	}
-	if cfg.SocketGID != 1000 {
-		t.Fatalf("unexpected socket gid: got %d want %d", cfg.SocketGID, 1000)
+	if cfg.StateRetention != 48*time.Hour {
+		t.Fatalf("unexpected state retention: got %s want %s", cfg.StateRetention, 48*time.Hour)
+	}
+	if cfg.SocketUser != wantSocketUser {
+		t.Fatalf("unexpected socket user: got %q want %q", cfg.SocketUser, wantSocketUser)
+	}
+	if cfg.SocketGroup != wantSocketGroup {
+		t.Fatalf("unexpected socket group: got %q want %q", cfg.SocketGroup, wantSocketGroup)
+	}
+	if cfg.AdminGroup != wantAdminGroup {
+		t.Fatalf("unexpected admin group: got %q want %q", cfg.AdminGroup, wantAdminGroup)
+	}
+	if cfg.DseditgroupBin != wantDseditgroup {
+		t.Fatalf("unexpected dseditgroup bin: got %q want %q", cfg.DseditgroupBin, wantDseditgroup)
+	}
+	if cfg.DsmemberutilBin != wantDsmemberutil {
+		t.Fatalf("unexpected dsmemberutil bin: got %q want %q", cfg.DsmemberutilBin, wantDsmemberutil)
 	}
 	if cfg.LogLevel != wantLogLevel {
 		t.Fatalf("unexpected log level: got %q want %q", cfg.LogLevel, wantLogLevel)
+	}
+	if cfg.WindowsAdminGroup != wantWindowsAdminGroup {
+		t.Fatalf("unexpected windows admin group: got %q want %q", cfg.WindowsAdminGroup, wantWindowsAdminGroup)
 	}
 }
 
@@ -118,10 +172,10 @@ func TestLoadFromEnvRejectsInvalidRequestTimeout(t *testing.T) {
 	}
 }
 
-func TestLoadFromEnvRejectsInvalidSocketGID(t *testing.T) {
-	t.Setenv(EnvSocketGID, "not-an-int")
+func TestLoadFromEnvRejectsInvalidStateRetention(t *testing.T) {
+	t.Setenv(EnvStateRetention, "not-a-duration")
 	if _, err := LoadFromEnv(); err == nil {
-		t.Fatal("expected socket gid parse error")
+		t.Fatal("expected state retention parse error")
 	}
 }
 
@@ -133,6 +187,7 @@ func TestValidateRejectsEmptySocketPath(t *testing.T) {
 		VisudoBin:       "visudo",
 		StatePath:       "/var/lib/thand/elevate/state.json",
 		CleanupInterval: time.Minute,
+		StateRetention:  24 * time.Hour,
 	}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected validation error for empty socket path")
@@ -147,6 +202,7 @@ func TestValidateRejectsEmptySudoersDir(t *testing.T) {
 		VisudoBin:       "visudo",
 		StatePath:       "/var/lib/thand/elevate/state.json",
 		CleanupInterval: time.Minute,
+		StateRetention:  24 * time.Hour,
 	}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected validation error for empty sudoers dir")
@@ -161,6 +217,7 @@ func TestValidateRejectsEmptySudoersFile(t *testing.T) {
 		VisudoBin:       "visudo",
 		StatePath:       "/var/lib/thand/elevate/state.json",
 		CleanupInterval: time.Minute,
+		StateRetention:  24 * time.Hour,
 	}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected validation error for empty sudoers file")
@@ -189,6 +246,7 @@ func TestValidateRejectsEmptyStatePath(t *testing.T) {
 		VisudoBin:       "visudo",
 		StatePath:       "   ",
 		CleanupInterval: time.Minute,
+		StateRetention:  24 * time.Hour,
 	}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected validation error for empty state path")
@@ -203,6 +261,7 @@ func TestValidateRejectsNonPositiveCleanupInterval(t *testing.T) {
 		VisudoBin:       "visudo",
 		StatePath:       "/var/lib/thand/elevate/state.json",
 		CleanupInterval: 0,
+		StateRetention:  24 * time.Hour,
 	}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected validation error for cleanup interval")
@@ -218,13 +277,14 @@ func TestValidateRejectsNonPositiveRequestTimeout(t *testing.T) {
 		StatePath:       "/var/lib/thand/elevate/state.json",
 		CleanupInterval: time.Minute,
 		RequestTimeout:  0,
+		StateRetention:  24 * time.Hour,
 	}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected validation error for request timeout")
 	}
 }
 
-func TestValidateRejectsInvalidSocketGID(t *testing.T) {
+func TestValidateRejectsNonPositiveStateRetention(t *testing.T) {
 	cfg := &Config{
 		SocketPath:      "/var/run/thand/elevate.sock",
 		SudoersDir:      "/etc/sudoers.d",
@@ -232,11 +292,11 @@ func TestValidateRejectsInvalidSocketGID(t *testing.T) {
 		VisudoBin:       "visudo",
 		StatePath:       "/var/lib/thand/elevate/state.json",
 		CleanupInterval: time.Minute,
-		RequestTimeout:  time.Minute,
-		SocketGID:       -2,
+		RequestTimeout:  time.Second,
+		StateRetention:  0,
 	}
 	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected validation error for socket gid")
+		t.Fatal("expected validation error for state retention")
 	}
 }
 
@@ -248,10 +308,112 @@ func TestValidateRejectsInvalidLogLevel(t *testing.T) {
 		VisudoBin:       "visudo",
 		StatePath:       "/var/lib/thand/elevate/state.json",
 		CleanupInterval: time.Minute,
+		RequestTimeout:  time.Second,
+		StateRetention:  24 * time.Hour,
 		LogLevel:        "verbose",
 	}
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("expected validation error for log level")
+	}
+}
+
+func TestValidateForWindowsDoesNotRequireLinuxSudoersFields(t *testing.T) {
+	cfg := &Config{
+		SocketPath:      `C:\ProgramData\Thand\elevate.sock`,
+		SudoersDir:      "   ",
+		SudoersFile:     "   ",
+		VisudoBin:       "   ",
+		StatePath:       `C:\ProgramData\Thand\elevate\state.json`,
+		CleanupInterval: time.Minute,
+		RequestTimeout:  time.Second,
+		StateRetention:  24 * time.Hour,
+		LogLevel:        "info",
+	}
+	if err := cfg.validateForOS("windows"); err != nil {
+		t.Fatalf("unexpected validation error for windows config: %v", err)
+	}
+}
+
+func TestValidateRejectsInvalidSocketUser(t *testing.T) {
+	cfg := &Config{
+		SocketPath:      "/var/run/thand/elevate.sock",
+		SudoersDir:      "/etc/sudoers.d",
+		SudoersFile:     "/etc/sudoers",
+		VisudoBin:       "visudo",
+		StatePath:       "/var/lib/thand/elevate/state.json",
+		CleanupInterval: time.Minute,
+		RequestTimeout:  time.Second,
+		StateRetention:  24 * time.Hour,
+		LogLevel:        "info",
+		SocketUser:      "alice smith",
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected validation error for invalid socket user")
+	}
+}
+
+func TestValidateRejectsInvalidSocketGroup(t *testing.T) {
+	cfg := &Config{
+		SocketPath:      "/var/run/thand/elevate.sock",
+		SudoersDir:      "/etc/sudoers.d",
+		SudoersFile:     "/etc/sudoers",
+		VisudoBin:       "visudo",
+		StatePath:       "/var/lib/thand/elevate/state.json",
+		CleanupInterval: time.Minute,
+		RequestTimeout:  time.Second,
+		StateRetention:  24 * time.Hour,
+		LogLevel:        "info",
+		SocketGroup:     "thand/admins",
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected validation error for invalid socket group")
+	}
+}
+
+func TestValidateForWindowsRejectsInvalidAdminGroup(t *testing.T) {
+	cfg := &Config{
+		SocketPath:        `C:\ProgramData\Thand\elevate.sock`,
+		StatePath:         `C:\ProgramData\Thand\elevate\state.json`,
+		CleanupInterval:   time.Minute,
+		RequestTimeout:    time.Second,
+		StateRetention:    24 * time.Hour,
+		LogLevel:          "info",
+		WindowsAdminGroup: "Administrators; Remove-Item *",
+	}
+	if err := cfg.validateForOS("windows"); err == nil {
+		t.Fatal("expected validation error for invalid windows admin group")
+	}
+}
+
+func TestValidateForDarwinRequiresAdminGroup(t *testing.T) {
+	cfg := &Config{
+		SocketPath:      "/var/run/thand/elevate.sock",
+		StatePath:       "/var/lib/thand/elevate/state.json",
+		CleanupInterval: time.Minute,
+		RequestTimeout:  time.Second,
+		StateRetention:  24 * time.Hour,
+		LogLevel:        "info",
+		AdminGroup:      " ",
+		DseditgroupBin:  "/usr/sbin/dseditgroup",
+		DsmemberutilBin: "/usr/bin/dsmemberutil",
+	}
+	if err := cfg.validateForOS("darwin"); err == nil {
+		t.Fatal("expected validation error for empty darwin admin group")
+	}
+}
+
+func TestValidateForDarwinRequiresDirectoryServiceBinaries(t *testing.T) {
+	cfg := &Config{
+		SocketPath:      "/var/run/thand/elevate.sock",
+		StatePath:       "/var/lib/thand/elevate/state.json",
+		CleanupInterval: time.Minute,
+		RequestTimeout:  time.Second,
+		StateRetention:  24 * time.Hour,
+		LogLevel:        "info",
+		AdminGroup:      "admin",
+	}
+	if err := cfg.validateForOS("darwin"); err == nil {
+		t.Fatal("expected validation error for missing darwin binaries")
 	}
 }
 

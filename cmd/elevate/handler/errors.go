@@ -1,14 +1,21 @@
 package handler
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+
+	"github.com/thand-io/agent/cmd/elevate/grant"
+)
 
 // ErrorCode is a stable, client-facing error category.
 type ErrorCode string
 
 const (
-	ErrorCodeInvalidRequest ErrorCode = "invalid_request"
-	ErrorCodeUnauthorized   ErrorCode = "unauthorized"
-	ErrorCodeInternal       ErrorCode = "internal_error"
+	ErrorCodeInvalidRequest    ErrorCode = "invalid_request"
+	ErrorCodeUnauthorized      ErrorCode = "unauthorized"
+	ErrorCodeInternal          ErrorCode = "internal_error"
+	ErrorCodeRequestConflict   ErrorCode = "request_conflict"
+	ErrorCodeActiveGrantExists ErrorCode = "active_grant_exists"
 )
 
 type responseError struct {
@@ -36,6 +43,31 @@ func internalErr(err error) *responseError {
 	return &responseError{Code: ErrorCodeInternal, Cause: err}
 }
 
+func requestConflictErr(err error) *responseError {
+	return &responseError{Code: ErrorCodeRequestConflict, Cause: err}
+}
+
+func activeGrantExistsErr(err error) *responseError {
+	return &responseError{Code: ErrorCodeActiveGrantExists, Cause: err}
+}
+
 func wrapInternal(msg string, err error) *responseError {
 	return internalErr(fmt.Errorf("%s: %w", msg, err))
+}
+
+func classifyResponseError(err error) *responseError {
+	if err == nil {
+		return nil
+	}
+
+	var resErr *responseError
+	if errors.As(err, &resErr) {
+		return resErr
+	}
+	switch {
+	case errors.Is(err, grant.ErrInvalidGrantRequest), errors.Is(err, grant.ErrInvalidRevokeRequest):
+		return invalidRequestErr(err)
+	default:
+		return internalErr(err)
+	}
 }

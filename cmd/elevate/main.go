@@ -24,7 +24,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	deps, err := buildDependencies(logger)
+	deps, err := buildDependencies()
 	if err != nil {
 		logger.Error("failed to build dependencies", "err", err)
 		os.Exit(1)
@@ -38,8 +38,10 @@ func main() {
 		"socket_path", deps.cfg.SocketPath,
 		"state_path", deps.cfg.StatePath,
 		"cleanup_interval", deps.cfg.CleanupInterval.String(),
+		"state_retention", deps.cfg.StateRetention.String(),
 		"request_timeout", deps.cfg.RequestTimeout.String(),
-		"socket_gid", deps.cfg.SocketGID,
+		"socket_user", deps.cfg.SocketUser,
+		"socket_group", deps.cfg.SocketGroup,
 		"log_level", deps.cfg.LogLevel,
 	)
 
@@ -63,7 +65,7 @@ type platformDependencies struct {
 	clock       handler.Clock
 }
 
-func buildDependencies(baseLogger *slog.Logger) (*dependencies, error) {
+func buildDependencies() (*dependencies, error) {
 	cfg, err := elevateconfig.LoadFromEnv()
 	if err != nil {
 		return nil, err
@@ -72,11 +74,7 @@ func buildDependencies(baseLogger *slog.Logger) (*dependencies, error) {
 	if err != nil {
 		return nil, err
 	}
-	logger := baseLogger
-	if logger == nil {
-		logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	}
-	logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}))
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}))
 
 	platformDeps, err := buildPlatformDependencies(cfg)
 	if err != nil {
@@ -100,7 +98,7 @@ func buildDependencies(baseLogger *slog.Logger) (*dependencies, error) {
 		handler.WithLogger(logger),
 		handler.WithRequestTimeout(cfg.RequestTimeout),
 	)
-	cleanupRunner, err := NewCleanupRunner(stateStore, platformDeps.grantEngine, platformDeps.clock, cfg.CleanupInterval, logger)
+	cleanupRunner, err := NewCleanupRunner(stateStore, platformDeps.grantEngine, platformDeps.clock, cfg.CleanupInterval, cfg.StateRetention, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -121,7 +119,7 @@ func buildPlatformDependencies(cfg *elevateconfig.Config) (*platformDependencies
 	case "darwin":
 		return buildDarwinPlatformDependencies(cfg)
 	case "windows":
-		return nil, fmt.Errorf("unsupported operating system %q: windows implementation not added yet", runtime.GOOS)
+		return buildWindowsPlatformDependencies(cfg)
 	default:
 		return nil, fmt.Errorf("unsupported operating system %q", runtime.GOOS)
 	}
@@ -129,8 +127,11 @@ func buildPlatformDependencies(cfg *elevateconfig.Config) (*platformDependencies
 
 func buildLinuxPlatformDependencies(cfg *elevateconfig.Config) (*platformDependencies, error) {
 	ipcOpts := []ipc.Option{}
-	if cfg.SocketGID >= 0 {
-		ipcOpts = append(ipcOpts, ipc.WithSocketGID(cfg.SocketGID))
+	if cfg.SocketUser != "" {
+		ipcOpts = append(ipcOpts, ipc.WithSocketUser(cfg.SocketUser))
+	}
+	if cfg.SocketGroup != "" {
+		ipcOpts = append(ipcOpts, ipc.WithSocketGroup(cfg.SocketGroup))
 	}
 	ipcServer, err := ipc.NewUnixServer(cfg.SocketPath, ipcOpts...)
 	if err != nil {
@@ -149,14 +150,17 @@ func buildLinuxPlatformDependencies(cfg *elevateconfig.Config) (*platformDepende
 	return &platformDependencies{
 		ipc:         ipcServer,
 		grantEngine: grantEngine,
-		clock:       clock.NewUnixClock(),
+		clock:       clock.NewClock(),
 	}, nil
 }
 
 func buildDarwinPlatformDependencies(cfg *elevateconfig.Config) (*platformDependencies, error) {
 	ipcOpts := []ipc.Option{}
-	if cfg.SocketGID >= 0 {
-		ipcOpts = append(ipcOpts, ipc.WithSocketGID(cfg.SocketGID))
+	if cfg.SocketUser != "" {
+		ipcOpts = append(ipcOpts, ipc.WithSocketUser(cfg.SocketUser))
+	}
+	if cfg.SocketGroup != "" {
+		ipcOpts = append(ipcOpts, ipc.WithSocketGroup(cfg.SocketGroup))
 	}
 	ipcServer, err := ipc.NewUnixServer(cfg.SocketPath, ipcOpts...)
 	if err != nil {
@@ -175,7 +179,31 @@ func buildDarwinPlatformDependencies(cfg *elevateconfig.Config) (*platformDepend
 	return &platformDependencies{
 		ipc:         ipcServer,
 		grantEngine: grantEngine,
-		clock:       clock.NewUnixClock(),
+		clock:       clock.NewClock(),
+	}, nil
+}
+
+func buildWindowsPlatformDependencies(cfg *elevateconfig.Config) (*platformDependencies, error) {
+	ipcOpts := []ipc.Option{}
+	if cfg.SocketUser != "" {
+		ipcOpts = append(ipcOpts, ipc.WithSocketUser(cfg.SocketUser))
+	}
+	ipcServer, err := ipc.NewUnixServer(cfg.SocketPath, ipcOpts...)
+	if err != nil {
+		return nil, err
+	}
+
+	grantEngine, err := grant.NewWindowsEngine(grant.WindowsEngineConfig{
+		AdminGroup: cfg.WindowsAdminGroup,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &platformDependencies{
+		ipc:         ipcServer,
+		grantEngine: grantEngine,
+		clock:       clock.NewClock(),
 	}, nil
 }
 

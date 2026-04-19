@@ -13,18 +13,18 @@ It accepts local IPC requests, verifies a challenge-response signature using pin
 |---|---|---|---|
 | Linux | `/etc/sudoers.d/thand-<request_id>` with `visudo` validation | `ClockGettime(CLOCK_BOOTTIME)` | ✅ Complete |
 | macOS | `dseditgroup` admin group membership via Directory Services | `ClockGettime(CLOCK_MONOTONIC)` | ✅ Complete |
-| Windows | `NetLocalGroupAddMembers` / PowerShell fallback | — | ⚠️ Not started |
+| Windows | PowerShell local-group cmdlets | `GetTickCount64` | ⚠️ In progress |
 
 ### Core Components
 
 - `main.go`
   - Loads config from env.
-  - Builds platform-specific dependencies (Linux or macOS) via `buildPlatformDependencies()`.
+  - Builds platform-specific dependencies via `buildPlatformDependencies()`.
   - Starts server + cleanup runner.
 - `ipc/`
-  - Unix socket transport (all platforms).
+  - Unix socket transport (Linux/macOS/Windows).
   - Newline-delimited JSON framing.
-  - Socket permissions + optional socket group ownership (`THAND_ELEVATE_SOCKET_GID`).
+  - Socket permissions + optional socket owner/group (`THAND_ELEVATE_SOCKET_USER`, `THAND_ELEVATE_SOCKET_GROUP`).
 - `handler/`
   - Request router (`grant`/`revoke`).
   - Challenge/response signature verification flow.
@@ -35,13 +35,13 @@ It accepts local IPC requests, verifies a challenge-response signature using pin
 - `grant/`
   - **Linux:** `linux_engine.go` — sudoers.d drop-in file management with `visudo -cf` validation.
   - **macOS:** `darwin_engine.go` — admin group membership via `dseditgroup`/`dsmemberutil`.
-  - Both engines share validation helpers (`isValidRequestID`, `isValidUsername`).
-  - Revoke is idempotent on both platforms.
+  - **Windows:** `windows_engine.go` — local Administrators membership via PowerShell cmdlets.
+  - Engines share validation helpers where applicable.
+  - Revoke is idempotent on all supported platforms.
 - `clock/`
-  - `unix_clock.go` — unified monotonic + wall-clock implementation using `ClockGettime`.
-  - `clock_source_linux.go` — selects `CLOCK_BOOTTIME` (survives suspend).
-  - `clock_source_darwin.go` — selects `CLOCK_MONOTONIC`.
-  - Falls back to process-relative time on syscall error.
+  - Per-OS monotonic clock implementations with wall-clock fallback.
+  - Linux uses `CLOCK_BOOTTIME`, macOS uses `CLOCK_MONOTONIC`, Windows uses `GetTickCount64`.
+  - Falls back to process-relative time if the platform-specific source fails.
 - `state/`
   - Atomic state persistence (`tmp + fsync + rename + dir fsync`).
   - Single versioned JSON file with dual-clock expiry (monotonic + wall-clock fallback).
@@ -57,30 +57,30 @@ It accepts local IPC requests, verifies a challenge-response signature using pin
 
 Environment variables (all platforms):
 
-| Variable | Default | Description |
-|---|---|---|
-| `THAND_ELEVATE_SOCKET_PATH` | `/var/run/thand/elevate.sock` | Unix socket path for IPC |
-| `THAND_ELEVATE_SOCKET_GID` | `-1` (disabled) | GID for socket directory/file ownership |
-| `THAND_ELEVATE_STATE_PATH` | `/var/lib/thand/elevate/state.json` | State file for grant persistence |
-| `THAND_ELEVATE_CLEANUP_INTERVAL` | `1m` | How often to sweep for expired grants |
-| `THAND_ELEVATE_REQUEST_TIMEOUT` | `30s` | Timeout for a single IPC request lifecycle |
-| `THAND_ELEVATE_LOG_LEVEL` | `info` | Log level (`debug`, `info`, `warn`, `error`) |
+- `THAND_ELEVATE_SOCKET_PATH` (default: `/var/run/thand/elevate.sock`)
+- `THAND_ELEVATE_STATE_RETENTION` (default: `24h`)
+- `THAND_ELEVATE_SOCKET_USER` (default: unset; set socket owner user by name)
+- `THAND_ELEVATE_SOCKET_GROUP` (default: unset; set socket group by name)
+- `THAND_ELEVATE_STATE_PATH` (default: `/var/lib/thand/elevate/state.json`)
+- `THAND_ELEVATE_CLEANUP_INTERVAL` (default: `1m`)
+- `THAND_ELEVATE_REQUEST_TIMEOUT` (default: `30s`)
+- `THAND_ELEVATE_LOG_LEVEL` (default: `info`; `debug|info|warn|error`)
 
 Linux-specific:
 
-| Variable | Default | Description |
-|---|---|---|
-| `THAND_ELEVATE_SUDOERS_DIR` | `/etc/sudoers.d` | Directory for temporary sudoers drop-in files |
-| `THAND_ELEVATE_SUDOERS_FILE` | `/etc/sudoers` | Main sudoers file (checked for `#includedir`) |
-| `THAND_ELEVATE_VISUDO_BIN` | `visudo` | Path to visudo binary for syntax validation |
+- `THAND_ELEVATE_SUDOERS_DIR` (default: `/etc/sudoers.d`)
+- `THAND_ELEVATE_SUDOERS_FILE` (default: `/etc/sudoers`)
+- `THAND_ELEVATE_VISUDO_BIN` (default: `visudo`)
 
 macOS-specific:
 
-| Variable | Default | Description |
-|---|---|---|
-| `THAND_ELEVATE_ADMIN_GROUP` | `admin` | macOS admin group name |
-| `THAND_ELEVATE_DSEDITGROUP_BIN` | `dseditgroup` | Path to dseditgroup binary |
-| `THAND_ELEVATE_DSMEMBERUTIL_BIN` | `dsmemberutil` | Path to dsmemberutil binary |
+- `THAND_ELEVATE_ADMIN_GROUP` (default: `admin`)
+- `THAND_ELEVATE_DSEDITGROUP_BIN` (default: `dseditgroup`)
+- `THAND_ELEVATE_DSMEMBERUTIL_BIN` (default: `dsmemberutil`)
+
+Windows-specific:
+
+- `THAND_ELEVATE_WINDOWS_ADMIN_GROUP` (default: `Administrators`)
 
 ## Testing
 
@@ -112,12 +112,14 @@ sudo chmod 755 /var/run/thand /var/lib/thand/elevate
 ```bash
 sudo env \
   THAND_ELEVATE_SOCKET_PATH=/var/run/thand/elevate.sock \
-  THAND_ELEVATE_SOCKET_GID="$(id -g thand-agent)" \
+  THAND_ELEVATE_SOCKET_USER="thand-agent" \
+  THAND_ELEVATE_SOCKET_GROUP="thand-agent" \
   THAND_ELEVATE_SUDOERS_DIR=/etc/sudoers.d \
   THAND_ELEVATE_SUDOERS_FILE=/etc/sudoers \
   THAND_ELEVATE_VISUDO_BIN=visudo \
   THAND_ELEVATE_STATE_PATH=/var/lib/thand/elevate/state.json \
   THAND_ELEVATE_CLEANUP_INTERVAL=1m \
+  THAND_ELEVATE_STATE_RETENTION=24h \
   THAND_ELEVATE_REQUEST_TIMEOUT=15m \
   THAND_ELEVATE_LOG_LEVEL=debug \
   ./bin/elevate
@@ -134,12 +136,13 @@ sudo chmod 755 /var/run/thand /var/lib/thand/elevate
 ```bash
 sudo env \
   THAND_ELEVATE_SOCKET_PATH=/var/run/thand/elevate.sock \
-  THAND_ELEVATE_SOCKET_GID="$(dscl . -read /Groups/thand-agent PrimaryGroupID | awk '{print $2}')" \
+  THAND_ELEVATE_SOCKET_GROUP=thand-agent \
   THAND_ELEVATE_ADMIN_GROUP=admin \
   THAND_ELEVATE_DSEDITGROUP_BIN=/usr/sbin/dseditgroup \
   THAND_ELEVATE_DSMEMBERUTIL_BIN=/usr/bin/dsmemberutil \
   THAND_ELEVATE_STATE_PATH=/var/lib/thand/elevate/state.json \
   THAND_ELEVATE_CLEANUP_INTERVAL=1m \
+  THAND_ELEVATE_STATE_RETENTION=24h \
   THAND_ELEVATE_REQUEST_TIMEOUT=15m \
   THAND_ELEVATE_LOG_LEVEL=debug \
   ./bin/elevate
@@ -215,3 +218,4 @@ Negative-path tip:
 - Helper has no network code path; signature authority is external to this binary.
 - macOS grant/revoke via `dseditgroup` is idempotent — adding an existing member or removing a non-member is safe.
 - Linux grant/revoke via sudoers.d is idempotent — removing a non-existent file is treated as success.
+- Windows grant/revoke via local-group membership is treated as idempotent.

@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/thand-io/agent/cmd/elevate/domain"
-	"github.com/thand-io/agent/cmd/elevate/handler"
 )
 
 // DarwinEngineOption configures a DarwinEngine instance.
@@ -71,7 +70,7 @@ type DarwinEngineConfig struct {
 }
 
 // NewDarwinEngine constructs a macOS GrantEngine backed by Directory Services.
-func NewDarwinEngine(cfg DarwinEngineConfig, opts ...DarwinEngineOption) (handler.GrantEngine, error) {
+func NewDarwinEngine(cfg DarwinEngineConfig, opts ...DarwinEngineOption) (*DarwinEngine, error) {
 	e := &DarwinEngine{
 		adminGroup:      strings.TrimSpace(cfg.AdminGroup),
 		dseditgroupBin:  strings.TrimSpace(cfg.DseditgroupBin),

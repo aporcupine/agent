@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -12,15 +13,16 @@ import (
 
 // CleanupRunner revokes and removes expired grants on startup and periodically.
 type CleanupRunner struct {
-	store    handler.StateStore
-	grants   handler.GrantEngine
-	clock    handler.Clock
-	interval time.Duration
-	logger   *slog.Logger
+	store     handler.StateStore
+	grants    handler.GrantEngine
+	clock     handler.Clock
+	interval  time.Duration
+	retention time.Duration
+	logger    *slog.Logger
 }
 
 // NewCleanupRunner builds a cleanup runner that sweeps expired grants.
-func NewCleanupRunner(store handler.StateStore, grants handler.GrantEngine, clock handler.Clock, interval time.Duration, logger *slog.Logger) (*CleanupRunner, error) {
+func NewCleanupRunner(store handler.StateStore, grants handler.GrantEngine, clock handler.Clock, interval time.Duration, retention time.Duration, logger *slog.Logger) (*CleanupRunner, error) {
 	if store == nil {
 		return nil, fmt.Errorf("state store is required")
 	}
@@ -33,22 +35,29 @@ func NewCleanupRunner(store handler.StateStore, grants handler.GrantEngine, cloc
 	if interval <= 0 {
 		return nil, fmt.Errorf("cleanup interval must be > 0")
 	}
+	if retention <= 0 {
+		return nil, fmt.Errorf("state retention must be > 0")
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}
 
 	return &CleanupRunner{
-		store:    store,
-		grants:   grants,
-		clock:    clock,
-		interval: interval,
-		logger:   logger,
+		store:     store,
+		grants:    grants,
+		clock:     clock,
+		interval:  interval,
+		retention: retention,
+		logger:    logger,
 	}, nil
 }
 
 // Run executes one startup sweep and then continues periodic sweeps until context cancellation.
 func (c *CleanupRunner) Run(ctx context.Context) error {
 	if err := c.runOnce(ctx); err != nil {
+		if isCleanupShutdownError(ctx, err) {
+			return nil
+		}
 		return err
 	}
 
@@ -61,6 +70,9 @@ func (c *CleanupRunner) Run(ctx context.Context) error {
 			return nil
 		case <-ticker.C:
 			if err := c.runOnce(ctx); err != nil {
+				if isCleanupShutdownError(ctx, err) {
+					return nil
+				}
 				return err
 			}
 		}
@@ -77,45 +89,67 @@ func (c *CleanupRunner) runOnce(ctx context.Context) error {
 	nowWall := c.clock.NowWallUTC()
 
 	for _, g := range grants {
+		if isCompleted(g) {
+			if !isRetentionExpired(g, nowWall, c.retention) {
+				continue
+			}
+			if err := c.store.Delete(ctx, g.RequestID); err != nil {
+				return fmt.Errorf("delete retained grant %q: %w", g.RequestID, err)
+			}
+			continue
+		}
+
 		if !isExpired(g, nowMono, nowWall) {
 			continue
 		}
 
-		if err := c.grants.Revoke(ctx, domain.RevokeRequest{
-			RequestID:  g.RequestID,
-			WorkflowID: g.WorkflowID,
-			Username:   g.Username,
-		}); err != nil {
-			return fmt.Errorf("revoke expired grant %q: %w", g.RequestID, err)
+		if !g.WasAlreadyPrivileged {
+			if err := c.grants.Revoke(ctx, domain.RevokeRequest{
+				RequestID:  g.RequestID,
+				WorkflowID: g.WorkflowID,
+				Username:   g.Username,
+			}); err != nil {
+				return fmt.Errorf("revoke expired grant %q: %w", g.RequestID, err)
+			}
+			c.logger.Info("admin revoked by cleanup",
+				"component", "elevate_cleanup",
+				"request_id", g.RequestID,
+				"workflow_id", g.WorkflowID,
+				"username", g.Username,
+				"reason", "expired",
+			)
 		}
-		c.logger.Info("admin revoked by cleanup",
-			"component", "elevate_cleanup",
-			"request_id", g.RequestID,
-			"workflow_id", g.WorkflowID,
-			"username", g.Username,
-			"reason", "expired",
-		)
 
-		if err := c.store.Delete(ctx, g.RequestID); err != nil {
-			return fmt.Errorf("delete expired grant %q: %w", g.RequestID, err)
+		g.CompletedAtWallUTC = nowWall
+		if err := c.store.Put(ctx, g); err != nil {
+			return fmt.Errorf("persist completed grant %q: %w", g.RequestID, err)
 		}
 	}
 
 	return nil
 }
 
-func isExpired(grant domain.GrantState, nowMonoNS int64, nowWallUTC time.Time) bool {
-	if grant.DurationSeconds <= 0 {
-		return true
-	}
+func isCompleted(grant domain.GrantState) bool {
+	return !grant.CompletedAtWallUTC.IsZero()
+}
 
-	durationNS := grant.DurationSeconds * int64(time.Second)
-	if grant.GrantedAtMonoNS > 0 && nowMonoNS >= grant.GrantedAtMonoNS {
-		return nowMonoNS-grant.GrantedAtMonoNS >= durationNS
-	}
-
-	if grant.GrantedAtWallUTC.IsZero() {
+func isRetentionExpired(grant domain.GrantState, nowWallUTC time.Time, retention time.Duration) bool {
+	if grant.CompletedAtWallUTC.IsZero() || nowWallUTC.IsZero() || retention <= 0 {
 		return false
 	}
-	return !nowWallUTC.Before(grant.GrantedAtWallUTC.Add(time.Duration(durationNS)))
+	return !grant.CompletedAtWallUTC.Add(retention).After(nowWallUTC)
+}
+
+func isExpired(grant domain.GrantState, nowMonoNS int64, nowWallUTC time.Time) bool {
+	return domain.IsExpiredGrantState(grant, nowMonoNS, nowWallUTC)
+}
+
+func isCleanupShutdownError(ctx context.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	return ctx.Err() != nil && errors.Is(err, ctx.Err())
 }
