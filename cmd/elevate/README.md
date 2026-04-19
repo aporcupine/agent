@@ -1,5 +1,7 @@
 # `cmd/elevate`
 
+> Review note: baseline privilege tracking needs follow-up. The README currently describes `WasAlreadyPrivileged` behavior as a general runtime feature, but the default Linux and macOS wiring does not currently install baseline-check hooks, while Windows does compute current membership by default. Treat those semantics as under review until the implementation and docs are aligned.
+
 Local privileged helper for temporary local-admin elevation.
 
 ## Overview
@@ -74,13 +76,15 @@ All engines validate `request_id`/`username` inputs, treat revoke as idempotent,
 
 Used by config validation and request handling to prevent shell injection.
 
+Linux grant/revoke is stricter than the shared helper-safe validator: `linux_engine.go` accepts only `^[a-z_][a-z0-9_-]*[$]?$` for usernames. For example, uppercase characters and dots may pass `ValidAccountName()` but will still be rejected by the Linux engine.
+
 #### `ipc/` — Unix domain socket transport
 
 | File | Purpose |
 |---|---|
 | `ipc.go` | `UnixServer` with newline-delimited JSON framing, 16 KB max frame, 250 ms poll intervals. Socket dir `0750`. Removes stale sockets on startup. |
 | `ipc_access_unix.go` | Socket permissions `0660` + `chown` for configured user/group (Linux/macOS). |
-| `ipc_access_windows.go` | Socket ACLs via `icacls` (SYSTEM:Full, socket_user:Modify). |
+| `ipc_access_windows.go` | When `THAND_ELEVATE_SOCKET_USER` is set, applies socket ACLs via `icacls` (SYSTEM:Full, socket_user:Modify). |
 
 #### `clock/` — Per-OS monotonic clock
 
@@ -288,7 +292,7 @@ The state file (`state.json`) uses schema version 1:
 | `granted_at_mono_ns` | Monotonic clock nanoseconds when grant was issued |
 | `duration_seconds` | Requested grant duration |
 | `was_already_privileged` | `true` if the user was already in the privileged group before the grant (revoke will be skipped) |
-| `completed_at_wall_utc` | Set when the grant is revoked or expires; indicates tombstone state. Omitted (`""`) while active. |
+| `completed_at_wall_utc` | Set when the grant is revoked or expires; indicates tombstone state. Unset while active. |
 
 ### Idempotency
 
@@ -323,6 +327,8 @@ All usernames and group names are validated before use in OS commands to prevent
 | Windows admin group | `^[A-Za-z][A-Za-z0-9 ._-]*$` | 64 | `Administrators`, `Local Admins` |
 
 Validation is enforced at multiple layers: configuration loading (`config.Validate()`), request handling (`handler/validation.go`), and within each grant engine.
+
+Linux is intentionally narrower at the engine layer: grant and revoke requests there use `^[a-z_][a-z0-9_-]*[$]?$`, so names such as `Alice` or `user.name` are rejected on Linux even though they satisfy the shared helper-safe validator above.
 
 ## Configuration
 
