@@ -104,5 +104,5 @@ config/temporal/*.key
 config/temporal/*.pem
 config/README.md
 
-# Ignore all .pem/certificates
-*.pem
+# Ignore manual test keys only; production trust anchors in verify/keys/ must be committed
+cmd/elevate/verify/keys/*.pem
