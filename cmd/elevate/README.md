@@ -20,49 +20,93 @@ The helper has no network code path. All communication is local IPC; signature a
 
 ### Core Components
 
-- **`main.go`** — Entry point. Loads configuration from environment variables, constructs platform-specific dependencies via `buildPlatformDependencies()` (runtime dispatch on `GOOS`), builds the cryptographic verifier with embedded trusted keys, creates the file-based state store, and starts the IPC server and cleanup runner concurrently. Handles graceful shutdown on `SIGINT`/`SIGTERM` with a 250 ms drain window.
-- **`server.go`** — IPC accept loop. Delegates each incoming connection to the handler for the full request lifecycle.
-- **`cleanup.go`** — Background cleanup runner. Performs a blocking startup sweep then periodic sweeps at a configurable interval. For each persisted grant: revokes expired grants (unless the user was already privileged before the grant), marks them as completed tombstones, and purges tombstones older than the retention window.
-- **`domain/`** — Shared protocol and domain types.
-  - `types.go` — Protocol frame structs (`RequestFrame`, `ChallengeFrame`, `SignedResponseFrame`, `ResultFrame`), internal request/result types (`GrantRequest`, `RevokeRequest`, `GrantResult`), and the persisted `GrantState` struct.
-  - `grant_state.go` — Grant lifecycle predicates: `IsCompletedGrantState()`, `IsActiveGrantState()`, `IsExpiredGrantState()` with fail-secure dual-clock expiry logic.
-- **`handler/`** — Request routing, authentication, and action handling.
-  - `interfaces.go` — Clean abstraction boundaries: `IPCServer`, `IPCConn`, `GrantEngine`, `SignatureVerifier`, `StateStore`, `Clock`. All dependencies are injected via interfaces for full testability.
-  - `handler.go` — Per-connection router. Reads the request frame with timeout enforcement, dispatches to `handleGrant()` or `handleRevoke()`.
-  - `auth.go` — Challenge-response authentication flow: nonce generation → challenge frame → signed response read → payload validation → Ed25519 signature verification against pinned keys.
-  - `handle_grant.go` — Grant flow with idempotency detection (same `request_id` + matching params = success), conflict detection (same `request_id` + different params = `request_conflict`), active grant checks (same username with active grant = `active_grant_exists`), and best-effort rollback if state persistence fails after a successful OS-level grant.
-  - `handle_revoke.go` — Revoke flow with baseline privilege tracking. If the user was already privileged before the grant (`WasAlreadyPrivileged`), the OS-level revoke is skipped. Already-completed grants return success (idempotent). State is marked completed with `CompletedAtWallUTC`.
-  - `validation.go` — Username validation delegating to `identity.ValidAccountName()`.
-  - `errors.go` — Client-facing error codes and internal error classification.
-- **`verify/`** — Cryptographic signature verification.
-  - `verifier.go` — `Verifier` type holding trusted Ed25519 public keys. Provides `GenerateNonce()` (32 random bytes, base64-encoded), `CanonicalPayload()` (deterministic JSON marshaling for signing), `DecodeSignedPayload()`, `DecodeSignature()`, `MatchSignedPayload()` (validates all fields against request + nonce), and `Verify()` (Ed25519 signature check).
-  - `keys_embedded.go` — Compile-time key embedding via `go:embed` directive. Reads `*.pem` files from `verify/keys/` directory. Files ending in `.pem.example` are ignored.
-  - `key_parse.go` — Parses trusted keys from both raw base64 and PEM (PKIX Ed25519) formats.
-  - `keys/` — Directory for pinned public key PEM files. Key IDs are derived from filenames (minus `.pem` extension). No production keys are committed by default.
-- **`grant/`** — Platform-specific privilege engines. All engines validate `request_id` and `username` inputs and treat revoke as idempotent.
-  - `linux_engine.go` — Creates a sudoers drop-in file at `/etc/sudoers.d/thand-<request_id>` with `visudo -cf` validation before activation. Verifies the base sudoers file includes the target directory via `#includedir` or `@includedir`. File permissions set to `0440`. Revoke removes the file (idempotent on `ENOENT`).
-  - `darwin_engine.go` — Manages admin group membership via `dseditgroup -o edit -a/-d` and verifies membership via `dsmemberutil checkmembership`. Revoke suppresses "not a member" errors for idempotency.
-  - `windows_engine.go` — Manages local Administrators group membership via PowerShell `Get-LocalGroupMember`, `Add-LocalGroupMember`, `Remove-LocalGroupMember` cmdlets. Handles race conditions (if add fails but user is already a member, treats as success). Distinguishes local vs domain-qualified principals for membership checks.
-  - All engines support a `WasAlreadyPrivileged` baseline check — if the user was already in the privileged group/sudoers before the grant, the flag is set and revoke is skipped.
-- **`identity/`** — Account name validation.
-  - `validation.go` — `ValidAccountName()` enforces pattern `^[A-Za-z_][A-Za-z0-9._-]*[$]?$` with a 32-character maximum. `ValidWindowsAdminGroup()` enforces pattern `^[A-Za-z][A-Za-z0-9 ._-]*$` with a 64-character maximum. Used by both config validation and request handling to prevent shell injection.
-- **`ipc/`** — Unix domain socket transport.
-  - `ipc.go` — `UnixServer` with newline-delimited JSON framing, 16 KB max frame size, and 250 ms read/write poll intervals (allows context cancellation). Creates socket directory with `0750` permissions. Removes stale sockets on startup (with safety check to avoid removing non-socket files).
-  - `ipc_access_unix.go` — Socket file permissions (`0660`) and `chown` for configured user/group (Linux/macOS).
-  - `ipc_access_windows.go` — Socket ACLs via `icacls` (SYSTEM:Full, socket_user:Modify).
-- **`clock/`** — Per-OS monotonic clock implementations with wall-clock fallback.
-  - `clock.go` — `NowWallUTC()` returns current UTC wall time. Platform-specific `NowMonoNS()` methods in build-tagged files.
-  - `mono_linux.go` — `CLOCK_BOOTTIME` (suspend-inclusive monotonic).
-  - `mono_macos.go` — `CLOCK_MONOTONIC`.
-  - `mono_windows.go` — `GetTickCount64()` converted to nanoseconds.
-  - All platforms fall back to process-relative time (`time.Since(started)`) if the platform-specific source fails.
-- **`state/`** — Atomic state persistence.
-  - `store.go` — `FileStore` using a mutex-protected single JSON file with schema version 1. Operations: `Put()` (upsert by `request_id`), `Delete()`, `List()`. Atomic writes via temp file → `fsync` → rename. State directory created with `0700` permissions.
-  - `sync_dir_unix.go` — Calls `Sync()` on the directory file descriptor after rename for durability (Linux/macOS).
-  - `sync_dir_windows.go` — No-op on Windows (atomic rename semantics are sufficient).
-- **`tools/sign_request/`** — CLI utility to generate `request` + `signed_response` protocol frames from a private key. Supports both offline mode (provide `-nonce` manually) and socket mode (`-socket` for full automated challenge-response flow against a running daemon).
-- **`tools/generate_test_key/`** — CLI utility to generate Ed25519 keypairs for testing. Outputs `<key-id>.pem` (public, `0644`) and `<key-id>.private.pem` (PKCS8 private, `0600`).
-- **`tools/windows_unix_socket_smoke/`** — Minimal server/client pair for verifying Unix socket support on Windows with Go's `net` package.
+| Component | Purpose |
+|---|---|
+| `main.go` | Entry point. Loads config from env, builds platform-specific deps via `buildPlatformDependencies()` (runtime `GOOS` dispatch), wires up verifier + state store + handler, starts IPC server and cleanup runner concurrently. Graceful shutdown on `SIGINT`/`SIGTERM` with 250 ms drain. |
+| `server.go` | IPC accept loop. Delegates each connection to the handler for the full request lifecycle. |
+| `cleanup.go` | Background cleanup runner. Startup sweep + periodic sweeps at configurable interval. Revokes expired grants, marks tombstones, purges old tombstones past retention window. |
+
+#### `domain/` — Protocol and domain types
+
+| File | Purpose |
+|---|---|
+| `types.go` | Protocol frame structs (`RequestFrame`, `ChallengeFrame`, `SignedResponseFrame`, `ResultFrame`), internal types (`GrantRequest`, `RevokeRequest`, `GrantResult`), and persisted `GrantState`. |
+| `grant_state.go` | Lifecycle predicates: `IsCompletedGrantState()`, `IsActiveGrantState()`, `IsExpiredGrantState()` with fail-secure dual-clock expiry. |
+
+#### `handler/` — Request routing, auth, and action handling
+
+All dependencies injected via interfaces (`interfaces.go`) for full testability.
+
+| File | Purpose |
+|---|---|
+| `handler.go` | Per-connection router. Reads request frame with timeout, dispatches to grant or revoke handler. |
+| `auth.go` | Challenge-response flow: nonce generation → challenge frame → signed response → payload validation → Ed25519 verification. |
+| `handle_grant.go` | Grant flow. Idempotency (same `request_id` + params = success), conflict detection (same `request_id` + different params), active-grant checks. Best-effort rollback if state persist fails after OS grant. |
+| `handle_revoke.go` | Revoke flow. Skips OS revoke if `WasAlreadyPrivileged`. Already-completed grants return success. Marks state completed. |
+| `validation.go` | Username validation via `identity.ValidAccountName()`. |
+| `errors.go` | Client-facing error codes and internal error classification. |
+
+#### `verify/` — Cryptographic signature verification
+
+| File | Purpose |
+|---|---|
+| `verifier.go` | `Verifier` with trusted Ed25519 keys. Nonce generation, canonical payload serialization, signature verification. |
+| `keys_embedded.go` | Compile-time key embedding via `go:embed` from `verify/keys/*.pem`. Ignores `.pem.example` files. |
+| `key_parse.go` | Parses keys from raw base64 and PEM (PKIX Ed25519) formats. |
+| `keys/` | Pinned public key PEM files. Key IDs derived from filenames. No production keys committed by default. |
+
+#### `grant/` — Platform-specific privilege engines
+
+All engines validate `request_id`/`username` inputs, treat revoke as idempotent, and support a `WasAlreadyPrivileged` baseline check (revoke skipped if user was already privileged).
+
+| File | Mechanism |
+|---|---|
+| `linux_engine.go` | Sudoers drop-in at `/etc/sudoers.d/thand-<request_id>`. Validated with `visudo -cf` before activation. Verifies `#includedir`/`@includedir` in base sudoers. File mode `0440`. |
+| `darwin_engine.go` | Admin group membership via `dseditgroup -o edit -a/-d`. Verification via `dsmemberutil checkmembership`. Suppresses "not a member" on revoke. |
+| `windows_engine.go` | Local group membership via PowerShell `Add-LocalGroupMember`/`Remove-LocalGroupMember`. Handles add-race (already member = success). Distinguishes local vs domain principals. |
+
+#### `identity/` — Account name validation
+
+| Function | Pattern | Max Length |
+|---|---|---|
+| `ValidAccountName()` | `^[A-Za-z_][A-Za-z0-9._-]*[$]?$` | 32 |
+| `ValidWindowsAdminGroup()` | `^[A-Za-z][A-Za-z0-9 ._-]*$` | 64 |
+
+Used by config validation and request handling to prevent shell injection.
+
+#### `ipc/` — Unix domain socket transport
+
+| File | Purpose |
+|---|---|
+| `ipc.go` | `UnixServer` with newline-delimited JSON framing, 16 KB max frame, 250 ms poll intervals. Socket dir `0750`. Removes stale sockets on startup. |
+| `ipc_access_unix.go` | Socket permissions `0660` + `chown` for configured user/group (Linux/macOS). |
+| `ipc_access_windows.go` | Socket ACLs via `icacls` (SYSTEM:Full, socket_user:Modify). |
+
+#### `clock/` — Per-OS monotonic clock
+
+| File | Source | Fallback |
+|---|---|---|
+| `mono_linux.go` | `CLOCK_BOOTTIME` (suspend-inclusive) | `time.Since(started)` |
+| `mono_macos.go` | `CLOCK_MONOTONIC` | `time.Since(started)` |
+| `mono_windows.go` | `GetTickCount64()` → nanoseconds | `time.Since(started)` |
+
+`clock.go` provides the shared `NowWallUTC()` method.
+
+#### `state/` — Atomic state persistence
+
+| File | Purpose |
+|---|---|
+| `store.go` | `FileStore` — mutex-protected JSON file (schema v1). `Put()` (upsert), `Delete()`, `List()`. Atomic writes: tmp → fsync → rename. Dir `0700`. |
+| `sync_dir_unix.go` | Directory `fsync` after rename for durability (Linux/macOS). |
+| `sync_dir_windows.go` | No-op (Windows atomic rename is sufficient). |
+
+#### `tools/` — Development utilities
+
+| Tool | Purpose |
+|---|---|
+| `sign_request/` | Generate `request` + `signed_response` frames. Offline mode (`-nonce`) or socket mode (`-socket`) for full automated flow. |
+| `generate_test_key/` | Generate Ed25519 keypairs. Outputs `<key-id>.pem` (public, `0644`) and `<key-id>.private.pem` (PKCS8, `0600`). |
+| `windows_unix_socket_smoke/` | Minimal client/server for verifying Unix socket support on Windows. |
 
 ## IPC Protocol
 
