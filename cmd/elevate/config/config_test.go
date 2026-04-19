@@ -16,6 +16,9 @@ func TestLoadFromEnvUsesDefaultSocketPath(t *testing.T) {
 	t.Setenv(EnvStateRetention, "")
 	t.Setenv(EnvSocketUser, "")
 	t.Setenv(EnvSocketGroup, "")
+	t.Setenv(EnvAdminGroup, "")
+	t.Setenv(EnvDseditgroupBin, "")
+	t.Setenv(EnvDsmemberutilBin, "")
 	t.Setenv(EnvLogLevel, "")
 	t.Setenv(EnvWindowsAdminGroup, "")
 
@@ -54,6 +57,15 @@ func TestLoadFromEnvUsesDefaultSocketPath(t *testing.T) {
 	if cfg.SocketGroup != "" {
 		t.Fatalf("unexpected socket group: got %q want empty", cfg.SocketGroup)
 	}
+	if cfg.AdminGroup != DefaultAdminGroup {
+		t.Fatalf("unexpected admin group: got %q want %q", cfg.AdminGroup, DefaultAdminGroup)
+	}
+	if cfg.DseditgroupBin != DefaultDseditgroupBin {
+		t.Fatalf("unexpected dseditgroup bin: got %q want %q", cfg.DseditgroupBin, DefaultDseditgroupBin)
+	}
+	if cfg.DsmemberutilBin != DefaultDsmemberutilBin {
+		t.Fatalf("unexpected dsmemberutil bin: got %q want %q", cfg.DsmemberutilBin, DefaultDsmemberutilBin)
+	}
 	if cfg.LogLevel != DefaultLogLevel {
 		t.Fatalf("unexpected log level: got %q want %q", cfg.LogLevel, DefaultLogLevel)
 	}
@@ -73,6 +85,9 @@ func TestLoadFromEnvUsesConfiguredSocketPath(t *testing.T) {
 	wantStateRetention := "48h"
 	wantSocketUser := "tom"
 	wantSocketGroup := "thand"
+	wantAdminGroup := "staff"
+	wantDseditgroup := "/usr/sbin/dseditgroup"
+	wantDsmemberutil := "/usr/bin/dsmemberutil"
 	wantLogLevel := "warn"
 	wantWindowsAdminGroup := "Administrators"
 	t.Setenv(EnvSocketPath, wantSocket)
@@ -85,6 +100,9 @@ func TestLoadFromEnvUsesConfiguredSocketPath(t *testing.T) {
 	t.Setenv(EnvStateRetention, wantStateRetention)
 	t.Setenv(EnvSocketUser, wantSocketUser)
 	t.Setenv(EnvSocketGroup, wantSocketGroup)
+	t.Setenv(EnvAdminGroup, wantAdminGroup)
+	t.Setenv(EnvDseditgroupBin, wantDseditgroup)
+	t.Setenv(EnvDsmemberutilBin, wantDsmemberutil)
 	t.Setenv(EnvLogLevel, wantLogLevel)
 	t.Setenv(EnvWindowsAdminGroup, wantWindowsAdminGroup)
 
@@ -122,6 +140,15 @@ func TestLoadFromEnvUsesConfiguredSocketPath(t *testing.T) {
 	}
 	if cfg.SocketGroup != wantSocketGroup {
 		t.Fatalf("unexpected socket group: got %q want %q", cfg.SocketGroup, wantSocketGroup)
+	}
+	if cfg.AdminGroup != wantAdminGroup {
+		t.Fatalf("unexpected admin group: got %q want %q", cfg.AdminGroup, wantAdminGroup)
+	}
+	if cfg.DseditgroupBin != wantDseditgroup {
+		t.Fatalf("unexpected dseditgroup bin: got %q want %q", cfg.DseditgroupBin, wantDseditgroup)
+	}
+	if cfg.DsmemberutilBin != wantDsmemberutil {
+		t.Fatalf("unexpected dsmemberutil bin: got %q want %q", cfg.DsmemberutilBin, wantDsmemberutil)
 	}
 	if cfg.LogLevel != wantLogLevel {
 		t.Fatalf("unexpected log level: got %q want %q", cfg.LogLevel, wantLogLevel)
@@ -355,6 +382,38 @@ func TestValidateForWindowsRejectsInvalidAdminGroup(t *testing.T) {
 	}
 	if err := cfg.validateForOS("windows"); err == nil {
 		t.Fatal("expected validation error for invalid windows admin group")
+	}
+}
+
+func TestValidateForDarwinRequiresAdminGroup(t *testing.T) {
+	cfg := &Config{
+		SocketPath:      "/var/run/thand/elevate.sock",
+		StatePath:       "/var/lib/thand/elevate/state.json",
+		CleanupInterval: time.Minute,
+		RequestTimeout:  time.Second,
+		StateRetention:  24 * time.Hour,
+		LogLevel:        "info",
+		AdminGroup:      " ",
+		DseditgroupBin:  "/usr/sbin/dseditgroup",
+		DsmemberutilBin: "/usr/bin/dsmemberutil",
+	}
+	if err := cfg.validateForOS("darwin"); err == nil {
+		t.Fatal("expected validation error for empty darwin admin group")
+	}
+}
+
+func TestValidateForDarwinRequiresDirectoryServiceBinaries(t *testing.T) {
+	cfg := &Config{
+		SocketPath:      "/var/run/thand/elevate.sock",
+		StatePath:       "/var/lib/thand/elevate/state.json",
+		CleanupInterval: time.Minute,
+		RequestTimeout:  time.Second,
+		StateRetention:  24 * time.Hour,
+		LogLevel:        "info",
+		AdminGroup:      "admin",
+	}
+	if err := cfg.validateForOS("darwin"); err == nil {
+		t.Fatal("expected validation error for missing darwin binaries")
 	}
 }
 

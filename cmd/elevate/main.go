@@ -117,7 +117,7 @@ func buildPlatformDependencies(cfg *elevateconfig.Config) (*platformDependencies
 	case "linux":
 		return buildLinuxPlatformDependencies(cfg)
 	case "darwin":
-		return nil, fmt.Errorf("unsupported operating system %q: darwin implementation not added yet", runtime.GOOS)
+		return buildDarwinPlatformDependencies(cfg)
 	case "windows":
 		return buildWindowsPlatformDependencies(cfg)
 	default:
@@ -142,6 +142,35 @@ func buildLinuxPlatformDependencies(cfg *elevateconfig.Config) (*platformDepende
 		SudoersDir:  cfg.SudoersDir,
 		SudoersFile: cfg.SudoersFile,
 		VisudoBin:   cfg.VisudoBin,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &platformDependencies{
+		ipc:         ipcServer,
+		grantEngine: grantEngine,
+		clock:       clock.NewClock(),
+	}, nil
+}
+
+func buildDarwinPlatformDependencies(cfg *elevateconfig.Config) (*platformDependencies, error) {
+	ipcOpts := []ipc.Option{}
+	if cfg.SocketUser != "" {
+		ipcOpts = append(ipcOpts, ipc.WithSocketUser(cfg.SocketUser))
+	}
+	if cfg.SocketGroup != "" {
+		ipcOpts = append(ipcOpts, ipc.WithSocketGroup(cfg.SocketGroup))
+	}
+	ipcServer, err := ipc.NewUnixServer(cfg.SocketPath, ipcOpts...)
+	if err != nil {
+		return nil, err
+	}
+
+	grantEngine, err := grant.NewDarwinEngine(grant.DarwinEngineConfig{
+		AdminGroup:      cfg.AdminGroup,
+		DseditgroupBin:  cfg.DseditgroupBin,
+		DsmemberutilBin: cfg.DsmemberutilBin,
 	})
 	if err != nil {
 		return nil, err

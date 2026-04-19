@@ -52,6 +52,18 @@ const (
 	EnvSocketUser = "THAND_ELEVATE_SOCKET_USER"
 	// EnvSocketGroup optionally sets socket group name.
 	EnvSocketGroup = "THAND_ELEVATE_SOCKET_GROUP"
+	// EnvAdminGroup overrides the macOS admin group name.
+	EnvAdminGroup = "THAND_ELEVATE_ADMIN_GROUP"
+	// DefaultAdminGroup is the default macOS admin group name.
+	DefaultAdminGroup = "admin"
+	// EnvDseditgroupBin overrides the dseditgroup binary path/name.
+	EnvDseditgroupBin = "THAND_ELEVATE_DSEDITGROUP_BIN"
+	// DefaultDseditgroupBin is the default dseditgroup binary name.
+	DefaultDseditgroupBin = "dseditgroup"
+	// EnvDsmemberutilBin overrides the dsmemberutil binary path/name.
+	EnvDsmemberutilBin = "THAND_ELEVATE_DSMEMBERUTIL_BIN"
+	// DefaultDsmemberutilBin is the default dsmemberutil binary name.
+	DefaultDsmemberutilBin = "dsmemberutil"
 	// EnvLogLevel overrides helper log level.
 	EnvLogLevel = "THAND_ELEVATE_LOG_LEVEL"
 	// DefaultLogLevel is the default helper log level.
@@ -73,6 +85,9 @@ type Config struct {
 	StateRetention    time.Duration
 	SocketUser        string
 	SocketGroup       string
+	AdminGroup        string
+	DseditgroupBin    string
+	DsmemberutilBin   string
 	LogLevel          string
 	WindowsAdminGroup string
 }
@@ -112,6 +127,7 @@ func LoadFromEnv() (*Config, error) {
 		}
 		cleanupInterval = parsed
 	}
+
 	requestTimeout := DefaultRequestTimeout
 	if configured := strings.TrimSpace(os.Getenv(EnvRequestTimeout)); configured != "" {
 		parsed, err := time.ParseDuration(configured)
@@ -120,6 +136,7 @@ func LoadFromEnv() (*Config, error) {
 		}
 		requestTimeout = parsed
 	}
+
 	stateRetention := DefaultStateRetention
 	if configured := strings.TrimSpace(os.Getenv(EnvStateRetention)); configured != "" {
 		parsed, err := time.ParseDuration(configured)
@@ -128,12 +145,30 @@ func LoadFromEnv() (*Config, error) {
 		}
 		stateRetention = parsed
 	}
+
 	socketUser := strings.TrimSpace(os.Getenv(EnvSocketUser))
 	socketGroup := strings.TrimSpace(os.Getenv(EnvSocketGroup))
+
+	adminGroup := strings.TrimSpace(os.Getenv(EnvAdminGroup))
+	if adminGroup == "" {
+		adminGroup = DefaultAdminGroup
+	}
+
+	dseditgroupBin := strings.TrimSpace(os.Getenv(EnvDseditgroupBin))
+	if dseditgroupBin == "" {
+		dseditgroupBin = DefaultDseditgroupBin
+	}
+
+	dsmemberutilBin := strings.TrimSpace(os.Getenv(EnvDsmemberutilBin))
+	if dsmemberutilBin == "" {
+		dsmemberutilBin = DefaultDsmemberutilBin
+	}
+
 	logLevel := strings.TrimSpace(os.Getenv(EnvLogLevel))
 	if logLevel == "" {
 		logLevel = DefaultLogLevel
 	}
+
 	windowsAdminGroup := strings.TrimSpace(os.Getenv(EnvWindowsAdminGroup))
 
 	cfg := &Config{
@@ -148,6 +183,9 @@ func LoadFromEnv() (*Config, error) {
 		StateRetention:    stateRetention,
 		SocketUser:        socketUser,
 		SocketGroup:       socketGroup,
+		AdminGroup:        adminGroup,
+		DseditgroupBin:    dseditgroupBin,
+		DsmemberutilBin:   dsmemberutilBin,
 		LogLevel:          logLevel,
 		WindowsAdminGroup: windowsAdminGroup,
 	}
@@ -186,7 +224,9 @@ func (c *Config) validateForOS(goos string) error {
 	if strings.TrimSpace(c.SocketPath) == "" {
 		return fmt.Errorf("socket path is required")
 	}
-	if goos != "windows" {
+
+	switch goos {
+	case "linux":
 		if strings.TrimSpace(c.SudoersDir) == "" {
 			return fmt.Errorf("sudoers dir is required")
 		}
@@ -196,7 +236,18 @@ func (c *Config) validateForOS(goos string) error {
 		if strings.TrimSpace(c.VisudoBin) == "" {
 			return fmt.Errorf("visudo binary is required")
 		}
+	case "darwin":
+		if !identity.ValidAccountName(c.AdminGroup) {
+			return fmt.Errorf("admin group is invalid")
+		}
+		if strings.TrimSpace(c.DseditgroupBin) == "" {
+			return fmt.Errorf("dseditgroup binary is required")
+		}
+		if strings.TrimSpace(c.DsmemberutilBin) == "" {
+			return fmt.Errorf("dsmemberutil binary is required")
+		}
 	}
+
 	if strings.TrimSpace(c.StatePath) == "" {
 		return fmt.Errorf("state path is required")
 	}

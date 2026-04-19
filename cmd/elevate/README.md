@@ -4,14 +4,22 @@ Local privileged helper for temporary local-admin elevation.
 
 ## Overview
 
-`elevate` is a standalone daemon intended to run as root (Linux target today).  
+`elevate` is a standalone daemon intended to run as root (Linux, macOS).  
 It accepts local IPC requests, verifies a challenge-response signature using pinned public keys, performs OS-level grant/revoke operations, and persists grant state for cleanup/recovery.
+
+### Platform Support
+
+| Platform | Grant Mechanism | Clock Source | Status |
+|---|---|---|---|
+| Linux | `/etc/sudoers.d/thand-<request_id>` with `visudo` validation | `ClockGettime(CLOCK_BOOTTIME)` | ✅ Complete |
+| macOS | `dseditgroup` admin group membership via Directory Services | `ClockGettime(CLOCK_MONOTONIC)` | ✅ Complete |
+| Windows | PowerShell local-group cmdlets | `GetTickCount64` | ⚠️ In progress |
 
 ### Core Components
 
 - `main.go`
   - Loads config from env.
-  - Builds dependencies.
+  - Builds platform-specific dependencies via `buildPlatformDependencies()`.
   - Starts server + cleanup runner.
 - `ipc/`
   - Unix socket transport (Linux/macOS/Windows).
@@ -25,31 +33,54 @@ It accepts local IPC requests, verifies a challenge-response signature using pin
   - Nonce handling + signed payload validation.
   - Ed25519 verification against compile-time pinned keys (`verify/keys/*.pem`).
 - `grant/`
-  - Linux grant engine (`/etc/sudoers.d/thand-<request_id>`).
-  - `visudo -cf` validation.
-  - Revoke removes request-specific sudoers entry.
+  - **Linux:** `linux_engine.go` — sudoers.d drop-in file management with `visudo -cf` validation.
+  - **macOS:** `darwin_engine.go` — admin group membership via `dseditgroup`/`dsmemberutil`.
+  - **Windows:** `windows_engine.go` — local Administrators membership via PowerShell cmdlets.
+  - Engines share validation helpers where applicable.
+  - Revoke is idempotent on all supported platforms.
+- `clock/`
+  - Per-OS monotonic clock implementations with wall-clock fallback.
+  - Linux uses `CLOCK_BOOTTIME`, macOS uses `CLOCK_MONOTONIC`, Windows uses `GetTickCount64`.
+  - Falls back to process-relative time if the platform-specific source fails.
 - `state/`
   - Atomic state persistence (`tmp + fsync + rename + dir fsync`).
+  - Single versioned JSON file with dual-clock expiry (monotonic + wall-clock fallback).
 - `cleanup.go`
   - Startup and periodic sweep of expired grants.
   - Revokes expired entries and removes state records.
 - `tools/sign_request/`
   - Local test utility to generate `request` + `signed_response` frames from a private key.
+- `tools/generate_test_key/`
+  - Local test utility to generate Ed25519 keypairs for testing.
 
 ## Configuration
 
-Environment variables:
+Environment variables (all platforms):
 
 - `THAND_ELEVATE_SOCKET_PATH` (default: `/var/run/thand/elevate.sock`)
+- `THAND_ELEVATE_STATE_RETENTION` (default: `24h`)
 - `THAND_ELEVATE_SOCKET_USER` (default: unset; set socket owner user by name)
 - `THAND_ELEVATE_SOCKET_GROUP` (default: unset; set socket group by name)
-- `THAND_ELEVATE_SUDOERS_DIR` (default: `/etc/sudoers.d`)
-- `THAND_ELEVATE_SUDOERS_FILE` (default: `/etc/sudoers`)
-- `THAND_ELEVATE_VISUDO_BIN` (default: `visudo`)
 - `THAND_ELEVATE_STATE_PATH` (default: `/var/lib/thand/elevate/state.json`)
 - `THAND_ELEVATE_CLEANUP_INTERVAL` (default: `1m`)
 - `THAND_ELEVATE_REQUEST_TIMEOUT` (default: `30s`)
 - `THAND_ELEVATE_LOG_LEVEL` (default: `info`; `debug|info|warn|error`)
+
+Linux-specific:
+
+- `THAND_ELEVATE_SUDOERS_DIR` (default: `/etc/sudoers.d`)
+- `THAND_ELEVATE_SUDOERS_FILE` (default: `/etc/sudoers`)
+- `THAND_ELEVATE_VISUDO_BIN` (default: `visudo`)
+
+macOS-specific:
+
+- `THAND_ELEVATE_ADMIN_GROUP` (default: `admin`)
+- `THAND_ELEVATE_DSEDITGROUP_BIN` (default: `dseditgroup`)
+- `THAND_ELEVATE_DSMEMBERUTIL_BIN` (default: `dsmemberutil`)
+
+Windows-specific:
+
+- `THAND_ELEVATE_WINDOWS_ADMIN_GROUP` (default: `Administrators`)
 
 ## Testing
 
@@ -61,14 +92,16 @@ go test ./...
 go test -race ./...
 ```
 
+All tests use mock/dummy data and run on any platform — no real OS commands are executed.
+
 ### Build
 
 ```bash
 cd cmd/elevate
-go build -o /home/tom/dev/agent/elevate ./
+go build -o bin/elevate ./
 ```
 
-### Run with real system paths (root)
+### Run with real system paths — Linux (root)
 
 ```bash
 sudo mkdir -p /var/run/thand /var/lib/thand/elevate
@@ -79,16 +112,40 @@ sudo chmod 755 /var/run/thand /var/lib/thand/elevate
 ```bash
 sudo env \
   THAND_ELEVATE_SOCKET_PATH=/var/run/thand/elevate.sock \
-  THAND_ELEVATE_SOCKET_USER="tom" \
-  THAND_ELEVATE_SOCKET_GROUP="tom" \
+  THAND_ELEVATE_SOCKET_USER="thand-agent" \
+  THAND_ELEVATE_SOCKET_GROUP="thand-agent" \
   THAND_ELEVATE_SUDOERS_DIR=/etc/sudoers.d \
   THAND_ELEVATE_SUDOERS_FILE=/etc/sudoers \
   THAND_ELEVATE_VISUDO_BIN=visudo \
   THAND_ELEVATE_STATE_PATH=/var/lib/thand/elevate/state.json \
   THAND_ELEVATE_CLEANUP_INTERVAL=1m \
+  THAND_ELEVATE_STATE_RETENTION=24h \
   THAND_ELEVATE_REQUEST_TIMEOUT=15m \
   THAND_ELEVATE_LOG_LEVEL=debug \
-  /home/tom/dev/agent/elevate
+  ./bin/elevate
+```
+
+### Run with real system paths — macOS (root)
+
+```bash
+sudo mkdir -p /var/run/thand /var/lib/thand/elevate
+sudo chown root:wheel /var/run/thand /var/lib/thand/elevate
+sudo chmod 755 /var/run/thand /var/lib/thand/elevate
+```
+
+```bash
+sudo env \
+  THAND_ELEVATE_SOCKET_PATH=/var/run/thand/elevate.sock \
+  THAND_ELEVATE_SOCKET_GROUP=thand-agent \
+  THAND_ELEVATE_ADMIN_GROUP=admin \
+  THAND_ELEVATE_DSEDITGROUP_BIN=/usr/sbin/dseditgroup \
+  THAND_ELEVATE_DSMEMBERUTIL_BIN=/usr/bin/dsmemberutil \
+  THAND_ELEVATE_STATE_PATH=/var/lib/thand/elevate/state.json \
+  THAND_ELEVATE_CLEANUP_INTERVAL=1m \
+  THAND_ELEVATE_STATE_RETENTION=24h \
+  THAND_ELEVATE_REQUEST_TIMEOUT=15m \
+  THAND_ELEVATE_LOG_LEVEL=debug \
+  ./bin/elevate
 ```
 
 ## Manual Protocol Smoke Test
@@ -111,7 +168,7 @@ socat - UNIX-CONNECT:/var/run/thand/elevate.sock
 
 ```bash
 KEYDIR="$(mktemp -d /tmp/elevate-keys-XXXXXX)"
-cd /home/tom/dev/agent/cmd/elevate
+cd cmd/elevate
 go run ./tools/generate_test_key \
   -out-dir "$KEYDIR" \
   -key-id local-test-key
@@ -121,17 +178,16 @@ Copy the generated public key into pinned keys, rebuild, restart:
 
 ```bash
 KEY_ID="local-test-key"
-cp "$KEYDIR/${KEY_ID}.pem" "/home/tom/dev/agent/cmd/elevate/verify/keys/${KEY_ID}.pem"
-cd /home/tom/dev/agent/cmd/elevate
-go build -o /home/tom/dev/agent/elevate ./
+cp "$KEYDIR/${KEY_ID}.pem" "verify/keys/${KEY_ID}.pem"
+go build -o bin/elevate ./
 # restart your running elevate process
 ```
 
 5. Generate frames with signer tool using matching private key + key id:
 
 ```bash
-cd /home/tom/dev/agent/cmd/elevate
-GOCACHE=/tmp/gocache go run ./tools/sign_request \
+cd cmd/elevate
+go run ./tools/sign_request \
   -private-key "$KEYDIR/${KEY_ID}.private.pem" \
   -key-id "$KEY_ID" \
   -nonce "<CHALLENGE_NONCE>" \
@@ -160,3 +216,6 @@ Negative-path tip:
 - No production keys are committed by default. You must add at least one `.pem` key file before starting the daemon without override options.
 - Changing pinned keys requires rebuilding/restarting the helper.
 - Helper has no network code path; signature authority is external to this binary.
+- macOS grant/revoke via `dseditgroup` is idempotent — adding an existing member or removing a non-member is safe.
+- Linux grant/revoke via sudoers.d is idempotent — removing a non-existent file is treated as success.
+- Windows grant/revoke via local-group membership is treated as idempotent.
